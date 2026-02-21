@@ -305,23 +305,23 @@ impl CDirect {
         let ub: Vec<f64> = self.bounds.iter().map(|&(_, hi)| hi).collect();
 
         // Wrap function to unscale: x_actual = lb + xu * (ub - lb)
+        //
+        // Note: We allocate a fresh Vec per call rather than using a thread-local
+        // RefCell buffer. A thread-local RefCell would panic if the user's objective
+        // function itself uses rayon internally — rayon work-stealing can cause the
+        // same thread to re-enter this closure while the RefCell borrow is still held.
+        // The allocation cost of a small Vec<f64> is negligible compared to any
+        // real objective function.
         let lb_clone = lb.clone();
         let ub_clone = ub.clone();
         let func = self.func.clone();
         let n_dims = n;
         let scaled_func = move |xu: &[f64]| -> f64 {
-            // Use a thread-local buffer to avoid per-call allocation
-            thread_local! {
-                static BUF: std::cell::RefCell<Vec<f64>> = const { std::cell::RefCell::new(Vec::new()) };
+            let mut x_actual = vec![0.0; n_dims];
+            for i in 0..n_dims {
+                x_actual[i] = lb_clone[i] + xu[i] * (ub_clone[i] - lb_clone[i]);
             }
-            BUF.with(|buf| {
-                let mut x_actual = buf.borrow_mut();
-                x_actual.resize(n_dims, 0.0);
-                for i in 0..n_dims {
-                    x_actual[i] = lb_clone[i] + xu[i] * (ub_clone[i] - lb_clone[i]);
-                }
-                func(&x_actual)
-            })
+            func(&x_actual)
         };
 
         let unit_lb = vec![0.0; n];

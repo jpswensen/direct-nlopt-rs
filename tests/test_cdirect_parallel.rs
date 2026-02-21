@@ -423,3 +423,61 @@ fn test_min_parallel_evals_threshold() {
 
     assert!(result.fun < 1e-1);
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Regression: objective function that itself uses rayon internally
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Regression test for <https://github.com/...> — rayon work-stealing re-entrancy.
+///
+/// When the user's objective function internally uses rayon (e.g. parallel
+/// simulations), rayon's work-stealing can cause the same thread to re-enter
+/// the scaled_func closure while a RefCell borrow was held, panicking with
+/// "RefCell already borrowed".
+///
+/// This test verifies that a rayon-using objective runs to completion without
+/// panic under both serial and parallel CDirect.
+#[test]
+fn test_objective_using_rayon_internally_no_panic() {
+    use rayon::prelude::*;
+
+    // Objective that internally uses rayon to compute a parallel sum-of-squares
+    let rayon_objective = |x: &[f64]| -> f64 {
+        // Force rayon work inside the objective
+        let partial_sums: Vec<f64> = (0..100)
+            .into_par_iter()
+            .map(|i| {
+                let scale = (i as f64) * 0.01;
+                x.iter().map(|&xi| (xi * scale).powi(2)).sum::<f64>()
+            })
+            .collect();
+        partial_sums.iter().sum::<f64>() / 100.0
+    };
+
+    let bounds = vec![(-5.0, 5.0); 3];
+
+    // Serial CDirect with rayon-using objective
+    let serial_opts = DirectOptions {
+        max_feval: 300,
+        algorithm: DirectAlgorithm::Original,
+        parallel: false,
+        ..Default::default()
+    };
+    let serial_result = CDirect::new(rayon_objective, bounds.clone(), serial_opts)
+        .minimize()
+        .unwrap();
+    assert!(serial_result.fun.is_finite());
+
+    // Parallel CDirect with rayon-using objective — this was the crash scenario
+    let parallel_opts = DirectOptions {
+        max_feval: 300,
+        algorithm: DirectAlgorithm::Original,
+        parallel: true,
+        min_parallel_evals: 2,
+        ..Default::default()
+    };
+    let parallel_result = CDirect::new(rayon_objective, bounds, parallel_opts)
+        .minimize()
+        .unwrap();
+    assert!(parallel_result.fun.is_finite());
+}
