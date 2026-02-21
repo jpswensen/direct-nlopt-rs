@@ -215,3 +215,56 @@
 - For exact serial equivalence (parallel=false), the linked list traversal order must be preserved
 - The infeasible fmax assignment order dependence is the only semantic difference between
   serial and parallel — and it doesn't affect final results due to dirreplaceinf_() post-processing
+
+
+## Iteration 4 — Analysis of hybrid.c: DIRECT + Local Optimization Hybrid (2026-02-21)
+
+### What was implemented
+- Thoroughly analyzed `nlopt/src/algs/cdirect/hybrid.c` (345 lines) function-by-function
+- Documented the extended hyperrect layout `3n+3`: (diameter, -f, -age, x[n], c[n], w[n])
+  - Key difference from cdirect.c: adds `x[n]` local optimum storage between metadata and center
+  - f-value and age stored negated so red-black tree max node = largest diameter + best f
+- Documented `fcount()`: thin wrapper counting evaluations for local optimizer
+- Documented `optimize_rect()`: runs local optimizer within rectangle bounds
+  - Computes local bounds from `c ± 0.5*w`
+  - Configures local optimizer with remaining eval/time budget
+  - Updates stored f-value and global best on success
+- Documented `randomize_x()`: sets starting point to random location within middle third of rect
+- Documented `longest()`: Gablonsky-style max-side diameter (always used, no Jones option)
+- Documented `divide_largest()`: core iteration function
+  - Always takes largest rect from tree (no convex hull or epsilon test)
+  - Selects ONE dimension to divide (first or random longest), unlike standard DIRECT's all-longest
+  - **Bisect vs trisect decision**: if local optimum `x` is far from center `c` (> w/6), bisect; else trisect
+  - Bisection shifts center toward optimum, halves width
+  - Trisection creates two children at ±w_new offsets
+  - Identified potential bug in trisection path: `w[i]` uses loop variable `i∈{-1,+1}` as array index
+- Documented `cdirect_hybrid_unscaled()`: main entry point with simple do-while loop
+  - Identified potential diameter computation bug: `longest(n, rnew+2*n)` should be `longest(n, rnew+3+2*n)`
+- Documented `cdirect_hybrid()`: rescaling wrapper identical to `cdirect()` pattern
+- Created comprehensive comparison table: hybrid vs standard DIRECT differences
+- Made scope decision: **EXCLUDE hybrid from Rust implementation**
+  - Requires local optimizer integration (outside DIRECT library scope)
+  - Has suspected bugs in trisection offset and diameter computation
+  - Rarely used in practice
+  - Architecturally distinct (no PO selection, no convex hull, no epsilon)
+
+### Files created
+- direct-nlopt-rs/analysis/hybrid_analysis.md
+
+### Files modified
+- plans/prd-direct-nlopt.json (marked hybrid.c analysis as passes: true)
+
+### Git commits
+- `86be866` docs(analysis): analyze hybrid.c DIRECT + local optimization hybrid
+
+### Test results
+- N/A (analysis-only task, no code changes)
+
+### Notes
+- hybrid.c stores f-values and ages NEGATED (r[1]=-f, r[2]=-age) unlike cdirect.c which stores them directly
+- The bisect/trisect decision based on local optimum position is the key innovation
+- Two potential bugs identified in NLOPT source:
+  1. `divide_largest()` line 211: `w[i]` with `i∈{-1,+1}` reads wrong memory for trisection offset
+  2. `cdirect_hybrid_unscaled()` line 266: `longest(n, rnew+2*n)` has wrong offset for widths array
+- These bugs may be masked by local optimization or rarely-triggered code paths
+- The hybrid is the only NLOPT DIRECT variant that uses bisection (all others use trisection exclusively)
