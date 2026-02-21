@@ -1450,3 +1450,32 @@
   with a different check order, leading to slightly different termination points
 - The nlopt_iurand stub is only needed for randomized variants (which_alg=16); it's never
   reached for which_alg=0 or which_alg=13
+
+
+## Iteration 32 — End-to-End maxfeval Termination Comparison (2026-02-21)
+
+### What was implemented
+- Created comprehensive maxfeval termination comparison tests between NLOPT C and Rust
+- Tests sphere function on [-5,5]^2 with maxfeval=50, 100, 200 for both DIRECT_GABLONSKY and DIRECT_ORIGINAL
+- Verifies nfev is IDENTICAL between NLOPT C and Rust at each maxfeval level
+- Verifies best solution (x and minf) is IDENTICAL (bit-exact) at each maxfeval level
+- Added monotonicity tests verifying nfev increases and minf decreases as maxfeval grows
+- Tests cover maxfeval=50, 100, 200, 500 for monotonicity checks
+
+### Files created
+- tests/test_maxfeval_termination.rs (8 tests: 3 Gablonsky + 3 Original maxfeval comparisons + 2 monotonicity)
+
+### Files modified
+- plans/prd-direct-nlopt.json (marked "End-to-end comparison: maxfeval termination" as passes: true)
+
+### Git commits
+- `2ff4708` test(integration): add end-to-end maxfeval termination comparison vs NLOPT C
+
+### Test results
+- All existing tests continue to pass
+- All comparisons show bit-exact matches between NLOPT C and Rust
+
+### Notes
+- Both Gablonsky and Original algorithm variants produce identical results to NLOPT C
+- nfev may exceed the specified maxfeval because NLOPT checks after processing a batch of rectangles
+- The monotonicity test confirms the expected behavior: more evaluations → better solutions
