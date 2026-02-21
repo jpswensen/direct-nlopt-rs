@@ -1934,4 +1934,373 @@ mod tests {
         assert_eq!(ifeas_s, ifeas_p);
         assert_eq!(iinfeas_s, iinfeas_p);
     }
+
+    // ──────────────────────────────────────────────────────────────────
+    // divide_rectangle tests — matching direct_dirdivide_() in DIRsubrout.c
+    // ──────────────────────────────────────────────────────────────────
+
+    /// Helper: create a Direct instance with controlled f-values for divide testing.
+    /// Sets up `count` child rects in a chain starting at `start_idx` with given
+    /// f-values, then calls divide_rectangle and returns the resulting lengths.
+    fn setup_divide_test(
+        dim: usize,
+        arrayi: &[usize],
+        f_values_pairs: &[(f64, f64)], // (f_pos, f_neg) per dimension
+        current_length: i32,
+    ) -> Direct {
+        let bounds: Vec<(f64, f64)> = vec![(-5.0, 5.0); dim];
+        let opts = DirectOptions {
+            algorithm: DirectAlgorithm::GablonskyLocallyBiased,
+            max_feval: 10000,
+            ..Default::default()
+        };
+        let mut d = Direct::new(sphere, &bounds, opts).unwrap();
+
+        // Set up parent rect at index 1 with all lengths = current_length
+        let sample = 1_usize;
+        for j in 0..dim {
+            d.storage.set_center(sample, j, 0.5);
+            d.storage.set_length(sample, j, current_length);
+        }
+        d.storage.point[sample] = 0;
+        d.storage.free = 2;
+
+        // Allocate 2*maxi children manually
+        let maxi = arrayi.len();
+        let start = 2_usize;
+        for k in 0..(2 * maxi) {
+            let idx = start + k;
+            d.storage.copy_center(idx, sample);
+            d.storage.copy_lengths(idx, sample);
+            if k < 2 * maxi - 1 {
+                d.storage.point[idx] = (idx + 1) as i32;
+            } else {
+                d.storage.point[idx] = 0;
+            }
+        }
+
+        // Set f-values for each pos/neg pair
+        for (k, &(f_pos, f_neg)) in f_values_pairs.iter().enumerate() {
+            let pos_idx = start + 2 * k;
+            let neg_idx = start + 2 * k + 1;
+            d.storage.set_f(pos_idx, f_pos, 0.0);
+            d.storage.set_f(neg_idx, f_neg, 0.0);
+        }
+
+        // Call divide_rectangle
+        d.divide_rectangle(start, current_length, sample, arrayi, maxi);
+        d
+    }
+
+    #[test]
+    fn test_divide_3d_unequal_w_sort() {
+        // 3D, all dims longest: arrayi = [1, 2, 3]
+        // f-values: dim1: (10.0, 12.0), dim2: (5.0, 8.0), dim3: (15.0, 20.0)
+        // w = [min(10,12)=10, min(5,8)=5, min(15,20)=15]
+        // Sort by w ascending: dim2(5) < dim1(10) < dim3(15)
+        let arrayi = vec![1, 2, 3];
+        let f_pairs = vec![(10.0, 12.0), (5.0, 8.0), (15.0, 20.0)];
+        let d = setup_divide_test(3, &arrayi, &f_pairs, 0);
+
+        let sample = 1;
+        // Parent: all dims set to new_len=1
+        assert_eq!(d.storage.length(sample, 0), 1);
+        assert_eq!(d.storage.length(sample, 1), 1);
+        assert_eq!(d.storage.length(sample, 2), 1);
+
+        // Sorted dim_info:
+        //   i=0: dim2 (dim_k=1), pos_child=4
+        //   i=1: dim1 (dim_k=0), pos_child=2
+        //   i=2: dim3 (dim_k=2), pos_child=6
+        //
+        // i=0 sets dim_k=1 in parent + ALL children
+        // i=1 sets dim_k=0 in parent + children from i=1 (dim1, dim3 pairs)
+        // i=2 sets dim_k=2 in parent + children from i=2 (dim3 pair only)
+
+        // dim2 children (pos=4, neg=5) — sorted first (i=0):
+        //   Only covered by i=0 → only dim1 set
+        assert_eq!(d.storage.length(4, 0), 0); // dim0 NOT set
+        assert_eq!(d.storage.length(4, 1), 1); // dim1 set at i=0
+        assert_eq!(d.storage.length(4, 2), 0); // dim2 NOT set
+        assert_eq!(d.storage.length(5, 0), 0);
+        assert_eq!(d.storage.length(5, 1), 1);
+        assert_eq!(d.storage.length(5, 2), 0);
+
+        // dim1 children (pos=2, neg=3) — sorted second (i=1):
+        //   Covered by i=0 (dim1) and i=1 (dim0) → dims 1 and 0 set
+        assert_eq!(d.storage.length(2, 0), 1); // dim0 set at i=1
+        assert_eq!(d.storage.length(2, 1), 1); // dim1 set at i=0
+        assert_eq!(d.storage.length(2, 2), 0); // dim2 NOT set
+        assert_eq!(d.storage.length(3, 0), 1);
+        assert_eq!(d.storage.length(3, 1), 1);
+        assert_eq!(d.storage.length(3, 2), 0);
+
+        // dim3 children (pos=6, neg=7) — sorted last (i=2):
+        //   Covered by all i=0,1,2 → all dims set
+        assert_eq!(d.storage.length(6, 0), 1);
+        assert_eq!(d.storage.length(6, 1), 1);
+        assert_eq!(d.storage.length(6, 2), 1);
+        assert_eq!(d.storage.length(7, 0), 1);
+        assert_eq!(d.storage.length(7, 1), 1);
+        assert_eq!(d.storage.length(7, 2), 1);
+    }
+
+    #[test]
+    fn test_divide_2d_equal_w_stable_sort() {
+        // 2D sphere: all w values equal → stable sort preserves original order
+        // arrayi = [1, 2], both f-values identical
+        let arrayi = vec![1, 2];
+        let f_pairs = vec![(10.0, 10.0), (10.0, 10.0)];
+        let d = setup_divide_test(2, &arrayi, &f_pairs, 0);
+
+        let sample = 1;
+        // Parent: both dims set to 1
+        assert_eq!(d.storage.length(sample, 0), 1);
+        assert_eq!(d.storage.length(sample, 1), 1);
+
+        // Stable sort: dim1 stays first (i=0), dim2 stays second (i=1)
+        // i=0 sets dim0 in parent + ALL children (dim_info[0..])
+        // i=1 sets dim1 in parent + children from i=1 only (dim2 pair)
+
+        // dim1 children (pos=2, neg=3) — sorted first, only get dim0 set
+        assert_eq!(d.storage.length(2, 0), 1); // dim0 set at i=0
+        assert_eq!(d.storage.length(2, 1), 0); // dim1 NOT set (i=1 doesn't cover)
+        assert_eq!(d.storage.length(3, 0), 1);
+        assert_eq!(d.storage.length(3, 1), 0);
+
+        // dim2 children (pos=4, neg=5) — sorted second, get both dims
+        assert_eq!(d.storage.length(4, 0), 1); // dim0 set at i=0 (covers all)
+        assert_eq!(d.storage.length(4, 1), 1); // dim1 set at i=1
+        assert_eq!(d.storage.length(5, 0), 1);
+        assert_eq!(d.storage.length(5, 1), 1);
+    }
+
+    #[test]
+    fn test_divide_1d_single_dim() {
+        // 1D: only one dimension to divide
+        let arrayi = vec![1];
+        let f_pairs = vec![(7.0, 3.0)];
+        let d = setup_divide_test(1, &arrayi, &f_pairs, 0);
+
+        let sample = 1;
+        // Parent: length = 1
+        assert_eq!(d.storage.length(sample, 0), 1);
+        // Both children: length = 1
+        assert_eq!(d.storage.length(2, 0), 1);
+        assert_eq!(d.storage.length(3, 0), 1);
+    }
+
+    #[test]
+    fn test_divide_nonzero_current_length() {
+        // Verify current_length is used properly (not always 0)
+        let arrayi = vec![1, 2];
+        let f_pairs = vec![(5.0, 8.0), (10.0, 12.0)];
+        let d = setup_divide_test(2, &arrayi, &f_pairs, 3);
+
+        let sample = 1;
+        let new_len = 4; // current_length + 1
+        // Parent: both dims set to new_len
+        assert_eq!(d.storage.length(sample, 0), new_len);
+        assert_eq!(d.storage.length(sample, 1), new_len);
+
+        // w[dim1]=min(5,8)=5, w[dim2]=min(10,12)=10
+        // Sorted: dim1(5) first, dim2(10) second
+        // i=0 (dim1, dim_k=0): set in parent + ALL children
+        // i=1 (dim2, dim_k=1): set in parent + dim2 children only
+
+        // dim1 children (pos=2, neg=3): only dim0 set to new_len
+        assert_eq!(d.storage.length(2, 0), new_len);
+        assert_eq!(d.storage.length(2, 1), 3); // original length preserved
+        assert_eq!(d.storage.length(3, 0), new_len);
+        assert_eq!(d.storage.length(3, 1), 3);
+
+        // dim2 children (pos=4, neg=5): both dims set to new_len
+        assert_eq!(d.storage.length(4, 0), new_len); // set by i=0 (covers all)
+        assert_eq!(d.storage.length(4, 1), new_len); // set by i=1
+        assert_eq!(d.storage.length(5, 0), new_len);
+        assert_eq!(d.storage.length(5, 1), new_len);
+    }
+
+    #[test]
+    fn test_divide_parent_center_unchanged() {
+        // Verify parent center is not modified by divide_rectangle
+        let arrayi = vec![1, 2];
+        let f_pairs = vec![(5.0, 8.0), (10.0, 12.0)];
+        let d = setup_divide_test(2, &arrayi, &f_pairs, 0);
+
+        let sample = 1;
+        assert_eq!(d.storage.center(sample, 0), 0.5);
+        assert_eq!(d.storage.center(sample, 1), 0.5);
+    }
+
+    #[test]
+    fn test_divide_3d_two_dims_longest() {
+        // 3D but only 2 dims are longest (e.g., after prior division)
+        // arrayi = [1, 3] (dims 1 and 3 are longest, dim 2 already divided)
+        let arrayi = vec![1, 3];
+        let f_pairs = vec![(20.0, 15.0), (8.0, 12.0)];
+        let d = setup_divide_test(3, &arrayi, &f_pairs, 1);
+
+        let sample = 1;
+        let new_len = 2; // current_length(1) + 1
+
+        // w[dim1] = min(20,15) = 15, w[dim3] = min(8,12) = 8
+        // Sort: dim3(8) < dim1(15)
+        // Sorted: i=0: dim3 (dim_k=2, pos_child=4), i=1: dim1 (dim_k=0, pos_child=2)
+
+        // i=0 (dim3, dim_k=2): set dim2 in parent + ALL children
+        // i=1 (dim1, dim_k=0): set dim0 in parent + dim1 children only
+
+        assert_eq!(d.storage.length(sample, 0), new_len);
+        assert_eq!(d.storage.length(sample, 2), new_len);
+        // dim 1 (not divided) keeps original length
+        assert_eq!(d.storage.length(sample, 1), 1);
+
+        // dim3 children (pos=4, neg=5) — sorted first (i=0):
+        //   Only dim2 set
+        assert_eq!(d.storage.length(4, 0), 1); // dim0 NOT set, keeps original
+        assert_eq!(d.storage.length(4, 1), 1); // dim1 untouched
+        assert_eq!(d.storage.length(4, 2), new_len); // dim2 set at i=0
+        assert_eq!(d.storage.length(5, 0), 1);
+        assert_eq!(d.storage.length(5, 1), 1);
+        assert_eq!(d.storage.length(5, 2), new_len);
+
+        // dim1 children (pos=2, neg=3) — sorted second (i=1):
+        //   Covered by i=0 (dim2) and i=1 (dim0)
+        assert_eq!(d.storage.length(2, 0), new_len); // dim0 set at i=1
+        assert_eq!(d.storage.length(2, 1), 1); // dim1 untouched
+        assert_eq!(d.storage.length(2, 2), new_len); // dim2 set at i=0
+        assert_eq!(d.storage.length(3, 0), new_len);
+        assert_eq!(d.storage.length(3, 1), 1);
+        assert_eq!(d.storage.length(3, 2), new_len);
+    }
+
+    #[test]
+    fn test_divide_w_uses_min_f() {
+        // Verify w[j] = min(f_pos, f_neg) determines sort order
+        // 2D: dim1 has f_pos=100, f_neg=1 → w=1
+        //     dim2 has f_pos=2, f_neg=50 → w=2
+        // Sort: dim1(1) < dim2(2), so dim1 is divided first
+        let arrayi = vec![1, 2];
+        let f_pairs = vec![(100.0, 1.0), (2.0, 50.0)];
+        let d = setup_divide_test(2, &arrayi, &f_pairs, 0);
+
+        // i=0 (dim1, dim_k=0): set dim0 in parent + ALL children
+        // i=1 (dim2, dim_k=1): set dim1 in parent + dim2 children only
+
+        // dim1 children (pos=2, neg=3): only dim0 set
+        assert_eq!(d.storage.length(2, 0), 1); // dim0 set at i=0
+        assert_eq!(d.storage.length(2, 1), 0); // dim1 NOT set
+        assert_eq!(d.storage.length(3, 0), 1);
+        assert_eq!(d.storage.length(3, 1), 0);
+
+        // dim2 children (pos=4, neg=5): both dims set
+        assert_eq!(d.storage.length(4, 0), 1); // dim0 set at i=0 (covers all)
+        assert_eq!(d.storage.length(4, 1), 1); // dim1 set at i=1
+        assert_eq!(d.storage.length(5, 0), 1);
+        assert_eq!(d.storage.length(5, 1), 1);
+    }
+
+    #[test]
+    fn test_divide_integrated_with_sample_points() {
+        // End-to-end: initialize, pick a rect, sample, evaluate, divide
+        // Verify results are consistent with the initialization test
+        let mut d = make_initialized_sphere(2, false);
+
+        // After initialization, rect 2 has lengths [1,0] (dim0 divided, dim1 not)
+        // Get longest dims of rect 2: dim 2 (0-indexed: 1) has length 0 (longest)
+        let (arrayi, maxi) = d.storage.get_longest_dims(2);
+        assert_eq!(maxi, 1); // only 1 longest dim
+
+        let depth = d.storage.get_max_deep(2);
+        let delta = d.storage.thirds[(depth + 1) as usize];
+        let new_start = d.sample_points(2, &arrayi, delta).unwrap();
+        d.evaluate_sample_points(new_start, maxi).unwrap();
+        d.divide_rectangle(new_start, depth, 2, &arrayi, maxi);
+
+        // After dividing rect 2 along its longest dim:
+        // New length = depth + 1
+        let new_len = depth + 1;
+        // Rect 2 (parent): dim with length 0 now = new_len
+        let divided_dim = arrayi[0] - 1; // 0-based
+        assert_eq!(d.storage.length(2, divided_dim), new_len);
+
+        // Children should have same new length
+        let pos_child = new_start;
+        let neg_child = d.storage.point[pos_child] as usize;
+        assert_eq!(d.storage.length(pos_child, divided_dim), new_len);
+        assert_eq!(d.storage.length(neg_child, divided_dim), new_len);
+    }
+
+    #[test]
+    fn test_divide_5d_all_dims() {
+        // 5D with all dims longest, varying w values
+        let arrayi = vec![1, 2, 3, 4, 5];
+        let f_pairs = vec![
+            (30.0, 25.0), // dim1: w=25
+            (10.0, 15.0), // dim2: w=10
+            (50.0, 45.0), // dim3: w=45
+            (5.0, 8.0),   // dim4: w=5
+            (20.0, 18.0), // dim5: w=18
+        ];
+        let d = setup_divide_test(5, &arrayi, &f_pairs, 0);
+
+        let sample = 1;
+        // Sort by w: dim4(5) < dim2(10) < dim5(18) < dim1(25) < dim3(45)
+        // Sorted dim_info:
+        //   i=0: dim4 (dim_k=3), pos_child=8
+        //   i=1: dim2 (dim_k=1), pos_child=4
+        //   i=2: dim5 (dim_k=4), pos_child=10
+        //   i=3: dim1 (dim_k=0), pos_child=2
+        //   i=4: dim3 (dim_k=2), pos_child=6
+
+        // All parent dims set to 1
+        for j in 0..5 {
+            assert_eq!(d.storage.length(sample, j), 1);
+        }
+
+        // dim4 pair (8,9) — sorted first (i=0):
+        //   Only covered by i=0 → only dim_k=3 set
+        assert_eq!(d.storage.length(8, 3), 1); // dim3 set at i=0
+        assert_eq!(d.storage.length(8, 0), 0);
+        assert_eq!(d.storage.length(8, 1), 0);
+        assert_eq!(d.storage.length(8, 2), 0);
+        assert_eq!(d.storage.length(8, 4), 0);
+        assert_eq!(d.storage.length(9, 3), 1);
+        assert_eq!(d.storage.length(9, 0), 0);
+
+        // dim2 pair (4,5) — sorted second (i=1):
+        //   Covered by i=0 (dim3) and i=1 (dim1) → dims 3 and 1 set
+        assert_eq!(d.storage.length(4, 3), 1); // dim3 set at i=0
+        assert_eq!(d.storage.length(4, 1), 1); // dim1 set at i=1
+        assert_eq!(d.storage.length(4, 0), 0);
+        assert_eq!(d.storage.length(4, 2), 0);
+        assert_eq!(d.storage.length(4, 4), 0);
+        assert_eq!(d.storage.length(5, 3), 1);
+        assert_eq!(d.storage.length(5, 1), 1);
+        assert_eq!(d.storage.length(5, 0), 0);
+
+        // dim5 pair (10,11) — sorted third (i=2):
+        //   Covered by i=0 (dim3), i=1 (dim1), i=2 (dim4) → dims 3,1,4 set
+        assert_eq!(d.storage.length(10, 3), 1);
+        assert_eq!(d.storage.length(10, 1), 1);
+        assert_eq!(d.storage.length(10, 4), 1);
+        assert_eq!(d.storage.length(10, 0), 0);
+        assert_eq!(d.storage.length(10, 2), 0);
+
+        // dim1 pair (2,3) — sorted fourth (i=3):
+        //   Covered by i=0,1,2,3 → dims 3,1,4,0 set
+        assert_eq!(d.storage.length(2, 3), 1);
+        assert_eq!(d.storage.length(2, 1), 1);
+        assert_eq!(d.storage.length(2, 4), 1);
+        assert_eq!(d.storage.length(2, 0), 1);
+        assert_eq!(d.storage.length(2, 2), 0); // dim2 NOT set
+
+        // dim3 pair (6,7) — sorted last (i=4):
+        //   Covered by all i=0..4 → all 5 dims set
+        for j in 0..5 {
+            assert_eq!(d.storage.length(6, j), 1, "dim3+ dim{} should be 1", j);
+            assert_eq!(d.storage.length(7, j), 1, "dim3- dim{} should be 1", j);
+        }
+    }
 }

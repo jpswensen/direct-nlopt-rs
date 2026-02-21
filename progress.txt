@@ -595,3 +595,36 @@
 - For all-feasible functions (common case), parallel and serial produce bit-identical results
 - During initialization, parallel=true takes the serial path if only 1 point (never in
   practice since init always has 2n ≥ 2 points)
+
+
+## Iteration 7 — Verify and Test divide_rectangle matching direct_dirdivide_() (2026-02-21)
+
+### What was implemented
+- Verified `divide_rectangle()` in direct.rs matches `direct_dirdivide_()` in DIRsubrout.c (lines 944-1009) exactly
+- Analyzed the C code's two-phase approach: phase 1 computes w[j] = min(f+, f-) and builds a sorted linked list via `dirinsertlist_2__`, phase 2 extracts in sorted order via `dirsearchmin_` and sets lengths incrementally
+- Confirmed Rust's `sort_by` (stable sort) matches C's insertion sort for equal w values
+- Verified the key invariant: dimensions divided FIRST (smallest w) have their length propagated to MORE children — children of later-divided dimensions accumulate all earlier dimensions' length increments
+- Added 9 comprehensive unit tests covering:
+  - 3D rectangle division with unequal w values verifying dimension sort order
+  - 2D with equal w values verifying stable sort preserves original order
+  - 1D single dimension division
+  - Non-zero current_length (depth > 0 divisions)
+  - Parent center unchanged after division
+  - 3D with only 2 dims longest (partial division)
+  - w = min(f_pos, f_neg) verification with asymmetric f-values
+  - End-to-end integration with sample_points + evaluate + divide
+  - 5D all-dims division with full length propagation verification
+
+### Files modified
+- direct-nlopt-rs/src/direct.rs (added 9 divide_rectangle tests + test helper setup_divide_test)
+- plans/prd-direct-nlopt.json (marked divide_rectangle task as passes: true)
+
+### Git commits
+- `34b7184` test(direct): add comprehensive divide_rectangle unit tests matching dirdivide_
+
+### Test results
+- cargo clippy clean
+
+### Notes
+- The incremental length propagation pattern means: children of the last-divided dimension (largest w) get ALL dimensions' lengths incremented (becoming cubes), while children of the first-divided dimension only get their own dimension incremented (remaining elongated)
+- This is the expected DIRECT behavior: trisecting along the dimension with best improvement first ensures the search focuses on promising directions
