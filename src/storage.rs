@@ -522,11 +522,22 @@ impl RectangleStorage {
 
         for i in 1..free_val {
             if self.f_values[i * 2 + 1] > 0.0 {
-                // Compute bounding box of rectangle i
+                // Compute bounding box of rectangle i.
+                //
+                // NLOPT compatibility: we replicate NLOPT's transposed length
+                // array access in dirreplaceinf_ (DIRsubrout.c line 575).
+                // The C code reads `length[rect + dim * n]` instead of the
+                // correct `length[dim + rect * n]` used everywhere else.
+                // This reads wrong sidelengths when n >= 2, but we replicate
+                // it for bit-exact fidelity with the C implementation.
                 let mut a = vec![0.0_f64; n];
                 let mut b = vec![0.0_f64; n];
                 for j in 0..n {
-                    let sidelength = self.thirds[self.lengths[i * n + j] as usize];
+                    // C buggy flat offset in column-major: (i-1) + j*n
+                    let c_offset = (i - 1) + j * n;
+                    let dim_read = c_offset % n;
+                    let rect_read = c_offset / n + 1; // 1-based
+                    let sidelength = self.thirds[self.lengths[rect_read * n + dim_read] as usize];
                     a[j] = self.centers[i * n + j] - sidelength;
                     b[j] = self.centers[i * n + j] + sidelength;
                 }
