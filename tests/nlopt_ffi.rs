@@ -141,6 +141,28 @@ extern "C" {
     ) -> NloptResultC;
 
     pub fn nlopt_seconds() -> c_double;
+
+    /// Tracing wrapper for NLOPT DIRECT — runs the algorithm with trace output.
+    pub fn nlopt_trace_direct(
+        fcn: DirectObjectiveFuncC,
+        fcn_data: *mut c_void,
+        n: c_int,
+        eps_in: c_double,
+        epsabs: c_double,
+        maxf: c_int,
+        maxt_in: c_int,
+        minf_out: *mut c_double,
+        x_out: *mut c_double,
+        lower: *const c_double,
+        upper: *const c_double,
+        algmethod: c_int,
+        fglobal: c_double,
+        fglper_in: c_double,
+        volper_in: c_double,
+        sigmaper_in: c_double,
+        trace_buf: *mut std::os::raw::c_char,
+        trace_buf_size: c_int,
+    ) -> c_int;
 }
 
 /// Safe wrapper around NLOPT's direct_optimize()

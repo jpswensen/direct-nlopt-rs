@@ -45,6 +45,7 @@ cc = { version = "1.0", optional = true }
 default = []
 parallel = []
 ffi = []
+trace = []
 nlopt-compare = ["cc"]
 
 [profile.release]

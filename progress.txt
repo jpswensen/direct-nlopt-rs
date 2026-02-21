@@ -2092,3 +2092,42 @@
   use a loose tolerance (1e-4) instead of 1e-15. All other test functions match exactly.
 - Gablonsky translation tests all match within 1e-15 tolerance
 - Golden files provide ongoing regression protection as Rust code is refactored
+
+
+## Iteration 10 — Create step-by-step trace comparison between NLOPT C and Rust (2026-02-21)
+
+### What was implemented
+- Added `trace` feature flag to Cargo.toml
+- Created src/trace.rs with TraceWriter (thread-safe buffer) and trace_write! macro
+- Added tracer field to Direct struct behind #[cfg(feature = "trace")]
+- Instrumented direct.rs at 5 key algorithm points:
+  TRACE SAMPLE, TRACE INIT, TRACE ITER, TRACE SELECT, TRACE DIVIDE, TRACE ENDITER
+- Created nlopt-shim/nlopt_trace_shim.c — C tracing wrapper replicating DIRect.c
+  main loop with matching trace output format
+- Created tests/test_trace_comparison.rs with 4 tests:
+  2D Gablonsky 5iter, 2D Original 5iter, 3D Gablonsky 5iter, 2D Gablonsky 20iter
+- Added rerun-if-changed directives to build.rs for shim source files
+- Exponent format normalization in trace comparison (C: e+01, Rust: e1)
+
+### Files created
+- direct-nlopt-rs/src/trace.rs
+- direct-nlopt-rs/nlopt-shim/nlopt_trace_shim.c
+- direct-nlopt-rs/tests/test_trace_comparison.rs
+
+### Files modified
+- direct-nlopt-rs/Cargo.toml (added trace feature)
+- direct-nlopt-rs/src/lib.rs (added pub mod trace)
+- direct-nlopt-rs/src/direct.rs (tracer field, set_tracer(), trace instrumentation)
+- direct-nlopt-rs/build.rs (nlopt_trace_shim.c compilation, rerun-if-changed)
+- direct-nlopt-rs/tests/nlopt_ffi.rs (nlopt_trace_direct FFI declaration)
+
+### Test results
+- All 4 trace comparison tests pass (with nlopt-compare,trace features)
+- All existing tests pass without trace feature (no regressions)
+- Trace lines match exactly between C and Rust for all test cases
+
+### Notes
+- Key discovery: NLOPT's c__/length arrays use row-major with stride n (not MAXFUNC)
+- After dirinit_, the linked list is rearranged — must use direct rect indices for init trace
+- For Original algorithm, SELECT j-index uses sequential counter (sel_idx) not array position
+- All floating-point values formatted with 17 significant digits for exact comparison

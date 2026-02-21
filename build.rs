@@ -41,6 +41,8 @@ fn build_nlopt_direct() {
         .file(nlopt_util_dir.join("qsort_r.c"))
         // Shim providing additional test helpers (thirds, levels, hull, diameter)
         .file(shim_dir.join("nlopt_util_shim.c"))
+        // Trace shim providing step-by-step tracing wrapper for DIRECT
+        .file(shim_dir.join("nlopt_trace_shim.c"))
         // Include paths: shim headers first (provide nlopt_config.h, nlopt.h),
         // then NLOPT source directories
         .include(shim_dir)
@@ -51,4 +53,10 @@ fn build_nlopt_direct() {
         .opt_level(2)
         .warnings(false)
         .compile("nlopt_direct");
+
+    // Ensure rebuild when shim sources change
+    println!("cargo:rerun-if-changed=nlopt-shim/nlopt_trace_shim.c");
+    println!("cargo:rerun-if-changed=nlopt-shim/nlopt_util_shim.c");
+    println!("cargo:rerun-if-changed=nlopt-shim/direct-internal.h");
+    println!("cargo:rerun-if-changed=build.rs");
 }

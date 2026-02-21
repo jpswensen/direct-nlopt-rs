@@ -41,6 +41,7 @@ pub mod direct;
 pub mod error;
 pub mod ffi;
 pub mod storage;
+pub mod trace;
 pub mod types;
 
 // Re-export main types

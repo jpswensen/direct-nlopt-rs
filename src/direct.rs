@@ -25,6 +25,8 @@ use rayon::prelude::*;
 use crate::error::{DirectError, Result};
 use crate::storage::RectangleStorage;
 use crate::types::{Bounds, CallbackFn, DirectOptions, ObjectiveFn, DIRECT_UNKNOWN_FGLOBAL};
+#[cfg(feature = "trace")]
+use crate::trace_write;
 
 /// Core DIRECT optimizer state for the Gablonsky Fortran→C translation path.
 ///
@@ -112,6 +114,11 @@ pub struct Direct {
     /// Matches NLOPT's `force_stop` pointer in `direct_dirsamplef_()`.
     /// Thread-safe for use in parallel evaluation.
     pub force_stop: Arc<AtomicBool>,
+
+    /// Optional trace writer for step-by-step algorithm comparison.
+    /// Only active when the `trace` feature is enabled.
+    #[cfg(feature = "trace")]
+    pub tracer: Option<std::sync::Arc<crate::trace::TraceWriter>>,
 }
 
 impl Direct {
@@ -186,7 +193,16 @@ impl Direct {
             nfev: 0,
             nit: 0,
             force_stop: Arc::new(AtomicBool::new(false)),
+            #[cfg(feature = "trace")]
+            tracer: None,
         })
+    }
+
+    /// Attach a trace writer for step-by-step algorithm comparison.
+    /// Only available when the `trace` feature is enabled.
+    #[cfg(feature = "trace")]
+    pub fn set_tracer(&mut self, tracer: std::sync::Arc<crate::trace::TraceWriter>) {
+        self.tracer = Some(tracer);
     }
 
     /// Validate inputs matching `direct_dirheader_()` in DIRsubrout.c (lines 1444-1565).
@@ -403,6 +419,22 @@ impl Direct {
         // Evaluate sample points (matches dirinit_ lines 1296-1300)
         self.evaluate_sample_points(new_start, maxi)?;
 
+        // Trace: log sample points and f-values after initialization evaluation
+        #[cfg(feature = "trace")]
+        {
+            let mut pos = new_start;
+            for k in 0..maxi {
+                let dim_1based = arrayi[k];
+                let pos_idx = pos;
+                let pos_f = self.storage.f_val(pos_idx);
+                let neg_idx = self.storage.point[pos_idx] as usize;
+                let neg_f = self.storage.f_val(neg_idx);
+                trace_write!(self.tracer, "TRACE SAMPLE rect=1 dim={} pos_idx={} pos_f={:.17e} neg_idx={} neg_f={:.17e}",
+                    dim_1based, pos_idx, pos_f, neg_idx, neg_f);
+                pos = self.storage.point[neg_idx] as usize;
+            }
+        }
+
         // Divide rectangle with currentlength=0 (matches dirinit_ lines 1316-1318)
         self.divide_rectangle(new_start, 0, 1, &arrayi, maxi);
 
@@ -412,6 +444,11 @@ impl Direct {
 
         // Set actmaxdeep = 1 (matches DIRect.c line 426 after dirinit_ returns)
         self.actmaxdeep = 1;
+
+        // Trace: log initialization result
+        #[cfg(feature = "trace")]
+        trace_write!(self.tracer, "TRACE INIT center_f={:.17e} minf={:.17e} minpos={} nfev={}",
+            f_center, self.minf, self.minpos, self.nfev);
 
         Ok(())
     }
@@ -1093,6 +1130,23 @@ impl Direct {
                 }
             }
 
+            // Trace: log selected rectangles for this iteration
+            #[cfg(feature = "trace")]
+            {
+                let selected_count = (0..po.count).filter(|&j| po.indices[j] > 0).count();
+                trace_write!(self.tracer, "TRACE ITER t={} selected={} minf={:.17e} nfev={}",
+                    t, selected_count, self.minf, numfunc);
+                let mut sel_idx = 0;
+                for j in 0..po.count {
+                    if po.indices[j] > 0 {
+                        let idx = po.indices[j] as usize;
+                        trace_write!(self.tracer, "TRACE SELECT j={} rect={} level={} f={:.17e}",
+                            sel_idx, po.indices[j], po.rect_levels[j], self.storage.f_val(idx));
+                        sel_idx += 1;
+                    }
+                }
+            }
+
             let oldpos = self.minpos;
 
             // 3c. Process selected rectangles
@@ -1153,6 +1207,22 @@ impl Direct {
                     // Evaluate sample points (DIRect.c lines 556-568)
                     self.evaluate_sample_points(new_start, maxi)?;
 
+                    // Trace: log sample points and f-values
+                    #[cfg(feature = "trace")]
+                    {
+                        let mut pos = new_start;
+                        for k in 0..maxi {
+                            let dim_1based = arrayi[k];
+                            let pos_idx = pos;
+                            let pos_f = self.storage.f_val(pos_idx);
+                            let neg_idx = self.storage.point[pos_idx] as usize;
+                            let neg_f = self.storage.f_val(neg_idx);
+                            trace_write!(self.tracer, "TRACE SAMPLE rect={} dim={} pos_idx={} pos_f={:.17e} neg_idx={} neg_f={:.17e}",
+                                help_idx, dim_1based, pos_idx, pos_f, neg_idx, neg_f);
+                            pos = self.storage.point[neg_idx] as usize;
+                        }
+                    }
+
                     // Check force_stop (DIRect.c lines 569-572)
                     if self.force_stop.load(Ordering::Relaxed) {
                         return_code = Some(DirectReturnCode::ForcedStop);
@@ -1175,6 +1245,19 @@ impl Direct {
                     self.storage
                         .insert_into_list(&mut start_chain, maxi, help_idx, jones);
 
+                    // Trace: log division result
+                    #[cfg(feature = "trace")]
+                    {
+                        let lengths_str: String = (0..self.dim)
+                            .map(|d| self.storage.length(help_idx, d).to_string())
+                            .collect::<Vec<_>>()
+                            .join(",");
+                        trace_write!(self.tracer, "TRACE DIVIDE rect={} maxi={} dims=[{}] lengths_after=[{}]",
+                            help_idx, maxi,
+                            arrayi[..maxi].iter().map(|d| d.to_string()).collect::<Vec<_>>().join(","),
+                            lengths_str);
+                    }
+
                     // Update function evaluation count (DIRect.c lines 595-596)
                     numfunc += 2 * maxi;
                 }
@@ -1187,6 +1270,11 @@ impl Direct {
 
             // Update nfev from numfunc
             self.nfev = numfunc;
+
+            // Trace: log end of iteration
+            #[cfg(feature = "trace")]
+            trace_write!(self.tracer, "TRACE ENDITER t={} minf={:.17e} minpos={} nfev={}",
+                t, self.minf, self.minpos, self.nfev);
 
             // Call callback if provided
             if let Some(cb) = callback {
