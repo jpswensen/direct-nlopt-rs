@@ -1995,3 +1995,57 @@
   - Extreme ratios: all intermediate values remain finite
 - No numerical overflow or underflow detected in any test configuration
 - Both DIRECT_GABLONSKY and DIRECT_ORIGINAL variants handle edge cases identically to NLOPT C
+
+
+## Iteration 8 — Handle and test edge cases: flat objective and degenerate cases (2026-02-21)
+
+### What was implemented
+- Created comprehensive edge-case test suite (30 tests) comparing NLOPT C vs Rust for
+  flat objectives and degenerate configurations
+- **Constant objective f(x)=42.0**: Verified both C and Rust terminate gracefully via maxfeval,
+  returning identical x, minf=42.0, and nfev for 2D and 3D, GABLONSKY and ORIGINAL variants
+- **Constant zero f(x)=0.0**: Same verification for the zero-valued constant case
+- **Infeasible regions (HUGE_VAL)**: Verified sphere with circular infeasible region
+  (||x||>3 → infeasible) produces identical results between C and Rust, including nfev
+  - Key discovery: NLOPT C uses `undefined_flag` mechanism to signal infeasibility, NOT
+    the return value. C callbacks must set `*undefined_flag=1` for infeasible points.
+    Returning +Inf without setting the flag causes C to treat the point as feasible with
+    value +Inf, leading to nfev divergence from Rust (which uses is_finite() check).
+  - Solution: C callbacks set `*undefined_flag=1` and return `f64::MAX`; Rust callbacks
+    return `f64::NAN`. Both trigger their respective infeasibility detection paths.
+- **maxfeval=1**: Verified minimal initialization works — both C and Rust evaluate 2*n+1
+  points during initialization (5 for 2D, 7 for 3D, 3 for 1D) then terminate immediately
+  with MAXFEVAL_EXCEEDED. All results (x, minf, nfev) match exactly.
+- **maxfeval=2**: Similarly tested with 2 function evaluations (less than init needs)
+- **maxfeval=2n+1**: Exactly enough for initialization, no main loop iterations
+- **maxiter=0**: In both NLOPT C and Rust, maxiter≤0 means "no iteration limit" (C uses
+  MAXDEEP, Rust uses 1_000_000). Verified that algorithm runs until maxfeval is reached,
+  producing identical results.
+- **maxiter=1**: Single iteration after initialization, verified identical for both variants
+- **Constant + infeasible regions**: Combined flat objective with infeasible outer region,
+  verified C and Rust handle the combination identically
+- All 30 tests use bit-exact comparison (x, minf, nfev match exactly)
+
+### Files created
+- direct-nlopt-rs/tests/test_flat_degenerate_cases.rs
+
+### Files modified
+- plans/prd-direct-nlopt.json (marked flat/degenerate edge cases as passes: true)
+
+### Git commits
+- `0ac63d0` test(edge-cases): add flat objective and degenerate case comparison tests
+
+### Test results
+- All 250 existing tests pass (no regressions)
+- 30 new edge-case tests pass with bit-exact C vs Rust matching
+- Clippy: only pre-existing warnings, no new issues
+
+### Notes
+- NLOPT C detects infeasibility via the `undefined_flag` callback parameter, not by checking
+  return values for NaN/Inf. The Rust implementation detects infeasibility via `is_finite()`
+  on the returned value. Both approaches work correctly when test callbacks use the proper
+  convention for each implementation.
+- maxiter=0 does NOT mean "immediate termination" in either implementation — it means
+  "no iteration limit". The algorithm terminates via other stopping criteria (maxfeval, etc).
+- Constant objective functions cause DIRECT to evaluate many points (all rectangles look
+  equally optimal), terminating only at maxfeval budget exhaustion.
