@@ -1230,3 +1230,40 @@
 - Both formulas are mathematically equivalent but differ in floating-point rounding
 - For symmetric bounds [-5,5] both formulas give exactly 0.0 (no rounding difference)
 - For asymmetric bounds the difference was ~1e-16 relative, fixed by matching C order
+
+
+## Iteration 26 — End-to-end Sphere DIRECT_ORIGINAL Comparison (2026-02-21)
+
+### What was implemented
+- Created end-to-end comparison test for sphere function with DIRECT_ORIGINAL (Jones 1993, algmethod=0)
+- Tests verify bit-identical results between NLOPT C direct_optimize() and Rust Direct implementation
+- This exercises the dirdoubleinsert_ path (Jones Original equal-value rectangle insertion) and
+  Original level computation (level = min_side_length_index, not k*N+p as in Gablonsky)
+- Six test cases cover the key configurations:
+  1. `test_sphere_original_comparison` — 2D sphere [-5,5]^2, maxiter=20, eps=1e-4 → nfev=4961 (identical)
+  2. `test_sphere_original_comparison_maxiter50` — 2D sphere, maxiter=50 → nfev=14377 (identical)
+  3. `test_sphere_original_comparison_maxfeval500` — 2D sphere, maxfeval=500 → nfev=613 (identical)
+  4. `test_sphere_original_comparison_3d` — 3D sphere [-5,5]^3, maxiter=20 → nfev=10683 (identical)
+  5. `test_sphere_original_parallel_false_exact` — 2D sphere, maxfeval=1000, maxiter=30 → bit-exact
+  6. `test_sphere_original_asymmetric_bounds` — 2D sphere [-2,4]×[-8,3], maxiter=20 → bit-exact
+- All tests assert exact equality (assert_eq!) for x, minf, and nfev between C and Rust
+- Note: DIRECT_ORIGINAL generates significantly more function evaluations per iteration than
+  DIRECT_GABLONSKY (e.g., 4961 vs 543 for 20 iterations on 2D sphere) due to the double-insert
+  mechanism that includes equal-valued rectangles
+
+### Files created
+- direct-nlopt-rs/tests/test_sphere_original_comparison.rs
+
+### Files modified
+- plans/prd-direct-nlopt.json (marked sphere DIRECT_ORIGINAL test as passes: true)
+
+### Git commits
+- `4fd313b` test(integration): add end-to-end sphere DIRECT_ORIGINAL comparison vs NLOPT C
+
+### Test results
+
+### Notes
+- DIRECT_ORIGINAL uses substantially more evaluations per iteration than DIRECT_GABLONSKY
+  because dirdoubleinsert_() adds all equal-valued rectangles at the same level
+- The 3D test with maxiter=20 used 10683 evaluations (vs 653 for Gablonsky)
+- Asymmetric bounds test confirms scaling faithfulness with the Original algorithm
