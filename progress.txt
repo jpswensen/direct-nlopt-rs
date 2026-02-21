@@ -691,3 +691,40 @@
   immediately, so minpos never changes and the callback never fires
 - `nfev` may slightly exceed `max_feval` because the termination check happens at the end
   of each iteration, after all selected rects have been processed — this matches NLOPT behavior
+
+
+## Iteration 13 — Verify and Complete replace_infeasible Implementation (2026-02-21)
+
+### What was implemented
+- Audited `replace_infeasible()` in storage.rs against `direct_dirreplaceinf_()` in
+  NLOPT DIRsubrout.c (lines 523–643) line by line. Implementation is faithful.
+- Audited `resort_list()` against `dirresortlist_()` (lines 410–513). Correct.
+- Audited `isinbox_()` (lines 376–400) — Rust uses `(0..n).all(|l| a[l] <= x && x <= b[l])` which matches the C logic exactly.
+- Fixed perturbation constant from `1e-6` (f64) to `1e-6_f32 as f64` to match NLOPT's
+  `1e-6f` float literal (promoted to double). Ensures bit-exact fidelity.
+- Verified dead code in NLOPT C (lines 619–623, unscaling x but never using it) is
+  correctly omitted in Rust (xs1/xs2 params are unused).
+- Verified the `f[flag] > 0.0` condition correctly re-scans both INFEASIBLE (2) and
+  REPLACED (1) points on each call, matching NLOPT behavior.
+- Added 5 new comprehensive unit tests for replace_infeasible:
+  - `test_replace_infeasible_multiple_nearby_takes_min`: two feasible near one infeasible → min selected
+  - `test_replace_infeasible_mixed_points`: multiple infeasible/feasible at various locations
+  - `test_replace_infeasible_fmax_finite`: fmax finite, no nearby → max(fmax+1, f)
+  - `test_replace_infeasible_previously_replaced_rescanned`: flag=1 points are re-processed
+  - `test_replace_infeasible_resort_changes_anchor`: replaced point becomes new anchor when f < anchor f
+
+### Files modified
+- direct-nlopt-rs/src/storage.rs (fixed 1e-6 → 1e-6_f32 as f64 perturbation, added 5 tests)
+- plans/prd-direct-nlopt.json (marked replace_infeasible task as passes: true)
+
+### Git commits
+- `47c847a` test(storage): verify and complete replace_infeasible with NLOPT fidelity
+
+### Test results
+- 142 tests passed, 0 failed (+5 new replace_infeasible tests)
+- cargo clippy clean
+
+### Notes
+- The initial sidelength computation in NLOPT C (lines 565–566: `help = dirgetmaxdeep_; sidelength = thirds[help] * 2`) is dead code — immediately overwritten in the per-dimension loop. Rust correctly omits it.
+- NLOPT passes `&u[1]` and `&l[1]` as c1/c2 to dirreplaceinf_, but they're only used in dead code (unscaling x, lines 619–623). Rust correctly marks xs1/xs2 as unused.
+- The `1e-6f` vs `1e-6` difference is ~2.5e-14 relative — negligible but fixed for fidelity.

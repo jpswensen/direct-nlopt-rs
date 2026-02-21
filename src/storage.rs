@@ -553,8 +553,11 @@ impl RectangleStorage {
                 }
 
                 if self.f_values[i * 2 + 1] == REPLACED {
-                    // Add small perturbation matching NLOPT: f += |f| * 1e-6
-                    self.f_values[i * 2] += self.f_values[i * 2].abs() * 1e-6;
+                    // Add small perturbation matching NLOPT: f += |f| * 1e-6f
+                    // NLOPT uses `1e-6f` (float literal) which promotes to double;
+                    // we replicate this for bit-exact fidelity.
+                    self.f_values[i * 2] +=
+                        self.f_values[i * 2].abs() * (1e-6_f32 as f64);
                     // Re-sort the linked list for this rectangle
                     self.resort_list(i, jones);
                 } else {
@@ -1579,9 +1582,11 @@ mod tests {
 
         s.replace_infeasible(&xs1, &xs2, 10.0, 1);
 
-        // r1 should now be replaced (flag=1) with f ≈ 10.0 * (1 + 1e-6)
+        // r1 should now be replaced (flag=1) with f ≈ 10.0 * (1 + 1e-6f)
+        // NLOPT uses 1e-6f (float literal) for the perturbation
+        let eps = 1e-6_f32 as f64;
         assert_eq!(s.f_flag(r1), REPLACED);
-        assert!((s.f_val(r1) - 10.0 * (1.0 + 1e-6)).abs() < 1e-10);
+        assert!((s.f_val(r1) - (10.0 + 10.0 * eps)).abs() < 1e-15);
     }
 
     #[test]
@@ -1617,6 +1622,201 @@ mod tests {
         // No nearby feasible point → flag stays 2, f = max(fmax+1, INFINITY) = INFINITY
         assert_eq!(s.f_flag(r1), INFEASIBLE);
         assert!(s.f_val(r1).is_infinite()); // max(11, INFINITY) = INFINITY
+    }
+
+    #[test]
+    fn test_replace_infeasible_multiple_nearby_takes_min() {
+        // Two feasible points near one infeasible — should take the minimum f-value.
+        let mut s = RectangleStorage::new(2, 20, 10);
+        s.init_lists();
+        s.precompute_thirds();
+
+        // Infeasible rect at center (0.5, 0.5), lengths [0,0] → box covers whole unit cube
+        let r1 = s.alloc_rect().unwrap();
+        s.set_center(r1, 0, 0.5);
+        s.set_center(r1, 1, 0.5);
+        s.set_f(r1, f64::INFINITY, INFEASIBLE);
+        s.set_length(r1, 0, 0);
+        s.set_length(r1, 1, 0);
+        s.anchor[1] = r1 as i32;
+        s.point[r1] = 0;
+
+        // Feasible at (0.6, 0.6) with f=20.0
+        let r2 = s.alloc_rect().unwrap();
+        s.set_center(r2, 0, 0.6);
+        s.set_center(r2, 1, 0.6);
+        s.set_f(r2, 20.0, FEASIBLE);
+        s.set_length(r2, 0, 0);
+        s.set_length(r2, 1, 0);
+
+        // Feasible at (0.4, 0.4) with f=5.0 (lower — should be selected)
+        let r3 = s.alloc_rect().unwrap();
+        s.set_center(r3, 0, 0.4);
+        s.set_center(r3, 1, 0.4);
+        s.set_f(r3, 5.0, FEASIBLE);
+        s.set_length(r3, 0, 0);
+        s.set_length(r3, 1, 0);
+
+        let xs1 = [1.0, 1.0];
+        let xs2 = [0.0, 0.0];
+        s.replace_infeasible(&xs1, &xs2, 20.0, 1);
+
+        let eps = 1e-6_f32 as f64;
+        assert_eq!(s.f_flag(r1), REPLACED);
+        assert!((s.f_val(r1) - (5.0 + 5.0 * eps)).abs() < 1e-15);
+    }
+
+    #[test]
+    fn test_replace_infeasible_mixed_points() {
+        // Multiple infeasible and feasible points at various locations.
+        let mut s = RectangleStorage::new(2, 30, 10);
+        s.init_lists();
+        s.precompute_thirds();
+
+        // r1: infeasible at (0.5, 0.5), lengths [0,0]
+        let r1 = s.alloc_rect().unwrap();
+        s.set_center(r1, 0, 0.5);
+        s.set_center(r1, 1, 0.5);
+        s.set_f(r1, f64::INFINITY, INFEASIBLE);
+        s.set_length(r1, 0, 0);
+        s.set_length(r1, 1, 0);
+        s.anchor[1] = r1 as i32;
+        s.point[r1] = 0;
+
+        // r2: feasible at (0.5, 0.5), f=3.0 — inside r1's box
+        let r2 = s.alloc_rect().unwrap();
+        s.set_center(r2, 0, 0.5);
+        s.set_center(r2, 1, 0.5);
+        s.set_f(r2, 3.0, FEASIBLE);
+        s.set_length(r2, 0, 0);
+        s.set_length(r2, 1, 0);
+
+        // r3: infeasible at (0.2, 0.2), lengths [2,2] → box ≈ [0.089, 0.311]
+        let r3 = s.alloc_rect().unwrap();
+        s.set_center(r3, 0, 0.2);
+        s.set_center(r3, 1, 0.2);
+        s.set_f(r3, f64::INFINITY, INFEASIBLE);
+        s.set_length(r3, 0, 2);
+        s.set_length(r3, 1, 2);
+
+        // r4: feasible at (0.8, 0.8), f=7.0 — outside r3's box
+        let r4 = s.alloc_rect().unwrap();
+        s.set_center(r4, 0, 0.8);
+        s.set_center(r4, 1, 0.8);
+        s.set_f(r4, 7.0, FEASIBLE);
+        s.set_length(r4, 0, 0);
+        s.set_length(r4, 1, 0);
+
+        let xs1 = [1.0, 1.0];
+        let xs2 = [0.0, 0.0];
+        s.replace_infeasible(&xs1, &xs2, 7.0, 1);
+
+        // r1 should be replaced with f ≈ 3.0 * (1 + eps)
+        let eps = 1e-6_f32 as f64;
+        assert_eq!(s.f_flag(r1), REPLACED);
+        assert!((s.f_val(r1) - (3.0 + 3.0 * eps)).abs() < 1e-15);
+
+        // r3 has no nearby feasible → stays infeasible, f = max(fmax+1, INF) = INF
+        assert_eq!(s.f_flag(r3), INFEASIBLE);
+        assert!(s.f_val(r3).is_infinite());
+    }
+
+    #[test]
+    fn test_replace_infeasible_fmax_finite() {
+        // When fmax is finite and no nearby feasible, f becomes max(fmax+1, f).
+        let mut s = RectangleStorage::new(1, 20, 10);
+        s.init_lists();
+        s.precompute_thirds();
+
+        let r1 = s.alloc_rect().unwrap();
+        s.set_center(r1, 0, 0.5);
+        s.set_f(r1, 42.0, INFEASIBLE); // flag > 0
+        s.set_length(r1, 0, 3);
+        s.anchor[1] = r1 as i32;
+        s.point[r1] = 0;
+
+        let xs1 = [1.0];
+        let xs2 = [0.0];
+        // fmax=100 → f becomes max(101, INF) = INF since we reset to INF first
+        s.replace_infeasible(&xs1, &xs2, 100.0, 1);
+
+        // After reset to INF, no nearby feasible → max(101, INF) = INF
+        // But if fmax == INF then it's skipped entirely
+        assert_eq!(s.f_flag(r1), INFEASIBLE);
+        assert!(s.f_val(r1).is_infinite());
+    }
+
+    #[test]
+    fn test_replace_infeasible_previously_replaced_rescanned() {
+        // A point with flag=1 (REPLACED) should be re-processed on each call,
+        // matching NLOPT's `f[flag] > 0` check.
+        let mut s = RectangleStorage::new(1, 20, 10);
+        s.init_lists();
+        s.precompute_thirds();
+
+        // r1: previously replaced, flag=1
+        let r1 = s.alloc_rect().unwrap();
+        s.set_center(r1, 0, 0.5);
+        s.set_f(r1, 50.0, REPLACED);
+        s.set_length(r1, 0, 0);
+        s.anchor[1] = r1 as i32;
+        s.point[r1] = 0;
+
+        // r2: feasible at 0.5, f=2.0
+        let r2 = s.alloc_rect().unwrap();
+        s.set_center(r2, 0, 0.5);
+        s.set_f(r2, 2.0, FEASIBLE);
+        s.set_length(r2, 0, 0);
+
+        let xs1 = [1.0];
+        let xs2 = [0.0];
+        s.replace_infeasible(&xs1, &xs2, 50.0, 1);
+
+        // r1 should be re-replaced with min(INF, 2.0) = 2.0, + perturbation
+        let eps = 1e-6_f32 as f64;
+        assert_eq!(s.f_flag(r1), REPLACED);
+        assert!((s.f_val(r1) - (2.0 + 2.0 * eps)).abs() < 1e-15);
+    }
+
+    #[test]
+    fn test_replace_infeasible_resort_changes_anchor() {
+        // When a replaced point has lower f than the anchor, it becomes the new anchor.
+        let mut s = RectangleStorage::new(1, 20, 10);
+        s.init_lists();
+        s.precompute_thirds();
+
+        // r1: feasible, f=100 — anchor at depth 0
+        let r1 = s.alloc_rect().unwrap();
+        s.set_center(r1, 0, 0.3);
+        s.set_f(r1, 100.0, FEASIBLE);
+        s.set_length(r1, 0, 0);
+        s.anchor[1] = r1 as i32;
+
+        // r2: infeasible at 0.3 (nearby r1), f=INF — linked after r1
+        let r2 = s.alloc_rect().unwrap();
+        s.set_center(r2, 0, 0.3);
+        s.set_f(r2, f64::INFINITY, INFEASIBLE);
+        s.set_length(r2, 0, 0);
+        s.point[r1] = r2 as i32;
+        s.point[r2] = 0;
+
+        // r3: feasible at 0.3, f=1.0 — nearby r2
+        let r3 = s.alloc_rect().unwrap();
+        s.set_center(r3, 0, 0.3);
+        s.set_f(r3, 1.0, FEASIBLE);
+        s.set_length(r3, 0, 0);
+
+        let xs1 = [1.0];
+        let xs2 = [0.0];
+        s.replace_infeasible(&xs1, &xs2, 100.0, 1);
+
+        // r2 replaced with f ≈ 1.0+eps, which is less than r1's 100.0
+        // After resort, r2 should be the new anchor
+        let eps = 1e-6_f32 as f64;
+        assert_eq!(s.f_flag(r2), REPLACED);
+        assert!((s.f_val(r2) - (1.0 + 1.0 * eps)).abs() < 1e-15);
+        assert_eq!(s.anchor[1], r2 as i32);
+        assert_eq!(s.point[r2], r1 as i32);
     }
 
     // ────────────────────────────────────────────────────────────────
