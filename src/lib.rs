@@ -36,12 +36,14 @@
 //!   Journal of Global Optimization 21, 27–37 (2001).
 //! - NLOPT: <https://github.com/stevengj/nlopt>
 
+pub mod cdirect;
 pub mod direct;
 pub mod error;
 pub mod storage;
 pub mod types;
 
 // Re-export main types
+pub use cdirect::CDirect;
 pub use error::{DirectError, DirectReturnCode, Result};
 pub use types::{
     Bounds, CallbackFn, DirectAlgorithm, DirectOptions, DirectResult, ObjectiveFn,

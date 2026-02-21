@@ -728,3 +728,46 @@
 - The initial sidelength computation in NLOPT C (lines 565–566: `help = dirgetmaxdeep_; sidelength = thirds[help] * 2`) is dead code — immediately overwritten in the per-dimension loop. Rust correctly omits it.
 - NLOPT passes `&u[1]` and `&l[1]` as c1/c2 to dirreplaceinf_, but they're only used in dead code (unscaling x, lines 619–623). Rust correctly marks xs1/xs2 as unused.
 - The `1e-6f` vs `1e-6` difference is ~2.5e-14 relative — negligible but fixed for fidelity.
+
+
+## Iteration 14 — Implement cdirect.rs: SGJ Red-Black Tree DIRECT (2026-02-21)
+
+### What was implemented
+- Implemented complete `cdirect.rs` module faithfully porting NLOPT's `cdirect.c` (603 lines)
+- `CDirectParams` struct matching cdirect.c `params` struct with `which_diam`, `which_div`, `which_opt` from base-3 `which_alg` encoding
+- `HyperRect` struct with flat `Vec<f64>` layout: `[diameter, f_value, age, centers..., widths...]` matching cdirect.c's `L=2n+3` array
+- `RectKey` with lexicographic `(diameter, f_value, age, id)` ordering matching `cdirect_hyperrect_compare()`
+- `rect_diameter()` with f32 rounding for both Jones (Euclidean) and Gablonsky (max-side) measures
+- `function_eval()` with min tracking matching cdirect.c lines 136–144
+- `divide_rect_by_key()` with both Path A (multi-dim Gablonsky: trisect all longest, sort by `min(f+,f-)`) and Path B (single-dim Jones: trisect one longest)
+- `convex_hull()` implementing monotone chain algorithm matching cdirect.c lines 261–378, with vertical-line performance hack and duplicate point handling
+- `divide_good_rects()` with epsilon test, DIRECT-L skip logic, randomized variant, and fallback heuristic
+- `optimize_unscaled()` main loop matching cdirect.c `cdirect_unscaled()` lines 476–549
+- `optimize_scaled()` rescaling wrapper matching cdirect.c `cdirect()` lines 569–603
+- `CDirect` public API with `new()`, `with_callback()`, `minimize()` dispatching to scaled/unscaled
+- Stopping checks in `check_stop_after_eval()`: fglobal, maxfeval, maxtime (matching FUNCTION_EVAL macro)
+- Used Rust `BTreeMap<RectKey, HyperRect>` as equivalent of NLOPT's `rb_tree`
+- Added `CDirect` to lib.rs public re-exports
+- 24 comprehensive unit tests covering: rect_diameter, convex_hull, all algorithm variants, termination modes, edge cases
+
+### Files created
+- direct-nlopt-rs/src/cdirect.rs (new module, ~1100 lines)
+
+### Files modified
+- direct-nlopt-rs/src/lib.rs (added `pub mod cdirect` and `pub use cdirect::CDirect`)
+- plans/prd-direct-nlopt.json (marked cdirect implementation as passes: true)
+
+### Git commits
+- `114645f` feat(cdirect): implement SGJ red-black tree DIRECT using BTreeMap
+
+### Test results
+- 166 tests passed, 0 failed (+24 new cdirect tests)
+- All 142 existing tests still pass (no regressions)
+- New tests: sphere 2D/3D/5D (DIRECT/DIRECT-L/unscaled), rosenbrock 2D, rastrigin 2D, convex hull, diameter, termination modes, callbacks, edge cases
+
+### Notes
+- Uses `BTreeMap` instead of red-black tree; semantically equivalent with guaranteed O(log n) operations
+- The `f32` rounding in `rect_diameter()` is critical for grouping rectangles by diameter level
+- Path A pre-evaluates function at all longest-side offsets before sorting; Path B evaluates after splitting
+- The fallback heuristic (divide largest rect with smallest f when nothing qualifies) matches cdirect.c lines 442–454
+- Remaining clippy warnings are about loop variable indexing style, acceptable for faithful C port
