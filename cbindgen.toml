@@ -1,0 +1,28 @@
+# cbindgen configuration for generating C header from Rust FFI bindings.
+# Run: cbindgen --config cbindgen.toml --crate direct-nlopt-rs --output include/direct_nlopt.h
+
+language = "C"
+header = "/* Auto-generated C header for direct-nlopt-rs. Do not edit manually. */"
+include_guard = "DIRECT_NLOPT_RS_H"
+no_includes = true
+sys_includes = ["stdint.h", "math.h"]
+
+[export]
+include = [
+    "DirectAlgorithmC",
+    "DirectResultC",
+]
+
+[export.rename]
+"DirectAlgorithmC" = "direct_nlopt_algorithm"
+"DirectResultC" = "direct_nlopt_result"
+
+[fn]
+rename_args = "None"
+
+[enum]
+rename_variants = "ScreamingSnakeCase"
+prefix_with_name = true
+
+[parse]
+parse_deps = false

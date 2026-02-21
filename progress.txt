@@ -1854,3 +1854,54 @@
   function evaluation cost dominates wall-clock time for non-trivial problems.
 - The `copy_within()` optimization leverages Rust's guaranteed memcpy semantics for
   non-overlapping copies, matching C's performance for bulk data movement.
+
+
+## Iteration 5 — Implement C FFI bindings for external language integration (2026-02-21)
+
+### What was implemented
+- Created `src/ffi.rs` with C-compatible function signatures matching NLOPT's `direct_optimize()`
+- Implemented `direct_nlopt_optimize()` — drop-in replacement with identical signature:
+  C function pointer + void* data, dimension, bounds arrays, output x/minf, all NLOPT parameters
+- Implemented `direct_nlopt_optimize_full()` — extended version returning `DirectResultC` struct
+  with return_code, nfev, and nit fields
+- Implemented `direct_nlopt_version()` — returns crate version string
+- Created `cbindgen.toml` configuration and generated `include/direct_nlopt.h` C header via cbindgen
+- The FFI layer wraps C function pointers into Rust closures, handles undefined_flag → NaN mapping,
+  and maps force_stop pointer into a callback returning bool
+- Registered `ffi` module in `lib.rs`
+- Created `tests/test_c_ffi.c` — standalone C test program (8 tests, 19 assertions) that links
+  against the Rust static library and exercises sphere, rosenbrock, rastrigin, optimize_full,
+  5D problems, version check, and invalid dimension handling
+- Created `tests/test_ffi.rs` — Rust integration test suite (9 standalone + 2 nlopt-compare tests)
+  verifying FFI results match both the Rust API and NLOPT C implementation
+- Verified: C program calling Rust FFI produces identical results to NLOPT C `direct_optimize()`
+  for both DIRECT_ORIGINAL and DIRECT_GABLONSKY on sphere function (bit-exact x, minf, return_code)
+
+### Files created
+- direct-nlopt-rs/src/ffi.rs
+- direct-nlopt-rs/cbindgen.toml
+- direct-nlopt-rs/include/direct_nlopt.h
+- direct-nlopt-rs/tests/test_c_ffi.c
+- direct-nlopt-rs/tests/test_ffi.rs
+
+### Files modified
+- direct-nlopt-rs/src/lib.rs (added `pub mod ffi`)
+- plans/prd-direct-nlopt.json (marked FFI task as passes: true)
+
+### Git commits
+- `d2d3214` feat(ffi): implement C FFI bindings matching NLOPT's direct_optimize()
+
+### Test results
+- All 590 tests pass (207 unit + 383 integration/doc-tests)
+- 6 new FFI unit tests in ffi.rs (sphere gablonsky, sphere original, optimize_full, invalid dimension, force_stop, version)
+- 9 new FFI integration tests in test_ffi.rs (sphere 2D gablonsky/original, rosenbrock, optimize_full, user_data passthrough, 5D sphere, invalid dim, version, Rust API consistency)
+- 2 new NLOPT comparison tests (sphere gablonsky vs NLOPT C, sphere original vs NLOPT C) — bit-exact match
+- 19/19 standalone C test assertions pass
+- No regressions
+
+### Notes
+- The FFI interface uses `DirectAlgorithmC` enum with Original=0 and Gablonsky=1, matching NLOPT's `direct_algorithm` enum
+- Force_stop is implemented as a callback that reads the C int pointer; the Gablonsky translation may complete initialization before the callback fires, so force_stop=1 from the start may not always produce FORCED_STOP return code
+- The `_start`, `_maxtime`, and `_logfile` parameters are accepted but currently unused (matching NLOPT's typical usage pattern where these are handled at the nlopt_opt level)
+- cbindgen generates the header automatically; it also exports some internal constants (FEASIBLE, INFEASIBLE, etc.) which are harmless
+- The crate already had `crate-type = ["rlib", "cdylib", "staticlib"]` and `libc` dependency configured
