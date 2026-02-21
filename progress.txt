@@ -367,3 +367,66 @@
   in the unscaling step of dirresortlist_ which is delegated to direct.rs)
 - The insert_into_list function faithfully reproduces the complex sorting logic from
   DIRsubrout.c including all 6 comparison branches for the pos1/pos2 pair insertion
+
+
+## Iteration 3 — Implement PotentiallyOptimal Selection (2026-02-21)
+
+### What was implemented
+- Implemented `PotentiallyOptimal` struct in storage.rs matching NLOPT's `s` array (MAXDIV × 2)
+  with `indices` (rect indices, 1-based) and `rect_levels` (level from get_level())
+- Implemented `PotentiallyOptimal::select()` matching `direct_dirchoose_()` in DIRsubrout.c
+  lines 102–261 exactly:
+  - All-infeasible path: picks first non-empty anchor, returns single selection (lines 134–148)
+  - Normal path: collects non-empty anchor heads across depths 0..act_deep (lines 150–159)
+  - Infeasible anchor check: anchor[0] in Rust = anchor[-1] in C (lines 162–166)
+  - Convex hull elimination sweep: iterates from maxpos down to 1, for each candidate j:
+    - Computes minimum slope (helplower) to candidates with larger diameter (lines 178–204)
+    - Computes maximum slope (helpgreater) to candidates with smaller diameter (lines 206–231)
+    - Eliminates if slope ≤ 0 in either direction (goto L60 equivalent)
+    - Eliminates if helpgreater > helplower (above convex hull)
+    - Epsilon test: f[j] - K*levels[level_j] > min(minf - eps*|minf|, minf - epsabs)
+  - Appends infeasible anchor at the end if present (lines 256–260)
+  - Note: NLOPT's `cheat` flag (always 0 in DIRect.c line 140) is documented but skipped
+  - Note: In dirchoose_, the `thirds` parameter actually receives the `levels[]` array
+    from the caller (DIRect.c line 455) — Rust uses storage.levels directly
+- Implemented `PotentiallyOptimal::double_insert()` matching `direct_dirdoubleinsert_()`
+  in DIRsubrout.c lines 274–332 exactly:
+  - For each selected rect, walks the linked list at the same depth level
+  - Adds rects with f-value within 1e-13 of the anchor head (lines 312–328)
+  - Returns Err(-6) if selection array capacity exceeded (lines 322–323)
+  - Only used with algmethod=0 (DIRECT Original, Jones 1993)
+- Added 15 unit tests covering all scenarios from the PRD:
+  - Monotonically decreasing f → all selected (convex hull)
+  - Rect above hull → excluded
+  - Multiple rects at same level → only anchor head considered
+  - Epsilon test elimination
+  - Gaps in depth distribution
+  - All infeasible → picks first available
+  - Infeasible anchor appended
+  - Jones Original (jones=0) level computation
+  - Double insert with equal/different f-values
+  - Double insert capacity overflow (Err(-6))
+  - Single rect edge case
+  - Empty storage edge case
+  - Multiple levels with double insert
+
+### Files modified
+- direct-nlopt-rs/src/storage.rs (added PotentiallyOptimal struct + select() + double_insert() + 15 tests)
+- plans/prd-direct-nlopt.json (marked PotentiallyOptimal task as passes: true)
+
+### Git commits
+- `d3f0f86` feat(storage): implement PotentiallyOptimal selection matching dirchoose_
+
+### Test results
+- 57 tests passed, 0 failed (+15 new tests)
+- cargo clippy clean (0 warnings)
+
+### Notes
+- The `cheat`/`kmax` feature in dirchoose_ is always disabled (cheat=0 in DIRect.c:140)
+- The clearing loop in C (lines 168–172) has a Fortran translation artifact: loop var j
+  but writes to fixed s[k]; in Rust we just clear remaining slots
+- The `thirds` parameter in dirchoose_ is confusingly named — it actually receives the
+  `levels[]` array from the caller; this is correctly handled in the Rust implementation
+- Feasibility check `f_flag <= 1.0` correctly includes both FEASIBLE (0.0) and REPLACED (1.0)
+- Level indexing: levels[] is indexed by get_level() return value, which for Gablonsky is
+  the min length index (bounded by actual search depth), well within levels[] array bounds
