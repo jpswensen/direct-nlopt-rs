@@ -1768,3 +1768,89 @@
 - At 8D with 16 available cores and 16 evals per division, we see ~4.4x speedup
 - For cheap objectives, parallel mode can be slower due to rayon overhead
 - Users should enable parallel only when objective evaluation cost exceeds ~10µs
+
+
+## Iteration 5 — Profile and optimize Rust implementation hot paths (2026-02-21)
+
+### What was implemented
+- Profiled Rust implementation using a custom timing benchmark across Gablonsky and CDirect
+  paths with sphere and rosenbrock at 2D, 5D, and 10D
+- Identified and optimized the following hot paths:
+
+**CDirect (cdirect.rs) — major optimizations:**
+- Refactored `convex_hull()` to use index-based hull tracking instead of cloning `RectKey`
+  for every hull candidate. Keys are only cloned for the final hull points, not during
+  the hull construction process. This eliminated O(n) clones per iteration.
+- Eliminated redundant `hull_info` Vec allocation in `divide_good_rects()` by accessing
+  `hull[i].diameter` and `hull[i].f_value` directly instead of creating a separate
+  `Vec<(RectKey, f64, f64)>` copy.
+- Replaced per-call `vec![0.0; n]` allocation in `optimize_scaled()`'s closure with
+  a `thread_local!` reusable buffer, eliminating heap allocation per function evaluation.
+- Fixed `ymaxmin` computation in `convex_hull()` from O(n²) (double iteration) to
+  O(n) (single reverse scan with fold).
+
+**Gablonsky (direct.rs + storage.rs) — targeted optimizations:**
+- Added `evaluate_with_buf()` method that accepts a pre-allocated `x_actual` buffer,
+  eliminating per-evaluation `vec![0.0; n]` allocation in the serial path.
+- Replaced per-point `Vec::new()` + collect in serial `evaluate_sample_points()` with
+  pre-allocated `x_norm` and `x_actual` buffers reused across all 2×maxi evaluations.
+- Used direct slice access (`center_slice`, `copy_from_slice`) instead of per-element
+  `center(pos, i)` calls for coordinate copying.
+
+**Storage (storage.rs) — slice-based optimizations:**
+- Refactored `get_level()`, `get_max_deep()`, `get_longest_dims()` to use slice-based
+  access patterns (`&self.lengths[pos*n..(pos+1)*n]`) instead of repeated index computation.
+- Replaced element-by-element `copy_center()` and `copy_lengths()` with `copy_within()`
+  for efficient memcpy-based bulk copying.
+- Added `center_slice()` accessor returning `&[f64]` slice for direct access.
+- Used `Vec::with_capacity(n)` in `get_longest_dims()` instead of `Vec::new()`.
+
+### Benchmark Results (before → after, median of 5 runs, --release)
+
+| Benchmark                   | Before (µs) | After (µs) | Speedup |
+|-----------------------------|-------------|-------------|---------|
+| sphere_2d_gablonsky_lb      |         251 |         201 |   1.25x |
+| sphere_5d_gablonsky_lb      |       1,842 |       1,242 |   1.48x |
+| sphere_10d_gablonsky_lb     |       4,318 |       3,062 |   1.41x |
+| rosenbrock_2d_gablonsky_lb  |         305 |         244 |   1.25x |
+| rosenbrock_5d_gablonsky_lb  |       2,799 |       2,268 |   1.23x |
+| sphere_2d_gablonsky_orig    |         279 |         260 |   1.07x |
+| sphere_5d_gablonsky_orig    |       2,671 |       2,265 |   1.18x |
+| sphere_10d_gablonsky_orig   |      18,129 |      17,941 |   1.01x |
+| sphere_2d_cdirect_lb        |       2,648 |         346 |   7.65x |
+| sphere_5d_cdirect_lb        |     124,940 |       2,507 |  49.8x  |
+| sphere_10d_cdirect_lb       |     446,007 |       6,318 |  70.6x  |
+
+### Files created
+- direct-nlopt-rs/examples/bench_baseline.rs (timing benchmark for profiling)
+
+### Files modified
+- direct-nlopt-rs/src/cdirect.rs (convex_hull index-based tracking, eliminate hull_info,
+  thread_local buffer in scaled closure, ymaxmin O(n) fix)
+- direct-nlopt-rs/src/direct.rs (evaluate_with_buf, pre-allocated buffers in serial path)
+- direct-nlopt-rs/src/storage.rs (slice-based get_level/get_max_deep/get_longest_dims,
+  copy_within in copy_center/copy_lengths, center_slice accessor)
+- plans/prd-direct-nlopt.json (marked performance profiling as passes: true)
+
+### Git commits
+- `d8ec7a2` perf(direct): profile and optimize hot paths — 1.2-70x speedup
+
+### Test results
+- All 233 tests pass (201 unit + 32 parallel verification)
+- No regressions
+- Clippy: only pre-existing warnings, no new issues
+
+### Notes
+- CDirect performance was dominated by excessive `RectKey` cloning in `convex_hull()` —
+  the old code cloned every key during hull construction (O(n) clones per call), then
+  additionally cloned into `hull_info`. With thousands of rectangles per iteration at
+  10D, this caused >99% overhead from allocation.
+- The refactored `convex_hull()` uses integer indices into the entries array during
+  construction, only cloning the handful of keys that end up on the final hull.
+- Gablonsky path gains come primarily from eliminating per-evaluation Vec allocations
+  in the serial path (x_norm and x_actual buffers reused across iterations).
+- SIMD-friendly layouts were considered but not implemented — the current SoA layout
+  already benefits from auto-vectorization of the slice operations, and the objective
+  function evaluation cost dominates wall-clock time for non-trivial problems.
+- The `copy_within()` optimization leverages Rust's guaranteed memcpy semantics for
+  non-overlapping copies, matching C's performance for bulk data movement.

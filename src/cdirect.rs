@@ -280,12 +280,20 @@ impl CDirect {
         let lb_clone = lb.clone();
         let ub_clone = ub.clone();
         let func = self.func.clone();
+        let n_dims = n;
         let scaled_func = move |xu: &[f64]| -> f64 {
-            let mut x_actual = vec![0.0; xu.len()];
-            for i in 0..xu.len() {
-                x_actual[i] = lb_clone[i] + xu[i] * (ub_clone[i] - lb_clone[i]);
+            // Use a thread-local buffer to avoid per-call allocation
+            thread_local! {
+                static BUF: std::cell::RefCell<Vec<f64>> = const { std::cell::RefCell::new(Vec::new()) };
             }
-            func(&x_actual)
+            BUF.with(|buf| {
+                let mut x_actual = buf.borrow_mut();
+                x_actual.resize(n_dims, 0.0);
+                for i in 0..n_dims {
+                    x_actual[i] = lb_clone[i] + xu[i] * (ub_clone[i] - lb_clone[i]);
+                }
+                func(&x_actual)
+            })
         };
 
         let unit_lb = vec![0.0; n];
@@ -528,11 +536,11 @@ impl CDirect {
         };
 
         let widths: Vec<f64> = rdiv.widths(n).to_vec();
-        let mut wmax = widths[0];
+        let mut wmax = 0.0_f64;
         let mut imax = 0;
-        for i in 1..n {
-            if widths[i] > wmax {
-                wmax = widths[i];
+        for (i, &w) in widths.iter().enumerate() {
+            if w > wmax {
+                wmax = w;
                 imax = i;
             }
         }
@@ -725,8 +733,8 @@ impl CDirect {
             return vec![];
         }
 
-        // Collect (diameter, f_value, key) sorted by (diameter, f_value, age)
-        // BTreeMap iteration is already in sorted order by RectKey
+        // Build (diameter, f_value, key_ref) from the sorted BTreeMap iteration.
+        // Avoid cloning keys until we know they're on the hull.
         let entries: Vec<(&RectKey, f64, f64)> = rtree
             .iter()
             .map(|(k, _)| (k, k.diameter, k.f_value))
@@ -740,104 +748,87 @@ impl CDirect {
         let yminmin = entries.first().unwrap().2;
         let xmax = entries.last().unwrap().1;
 
-        let mut hull: Vec<RectKey> = Vec::new();
+        // Use indices into entries[] for the hull, only clone at the end
+        let mut hull_idx: Vec<usize> = Vec::new();
 
         if allow_dups {
-            // Include duplicate points at (xmin, yminmin)
-            for &(k, d, f) in &entries {
+            for (ei, &(_, d, f)) in entries.iter().enumerate() {
                 if d == xmin && f == yminmin {
-                    hull.push(k.clone());
+                    hull_idx.push(ei);
                 } else {
                     break;
                 }
             }
         } else {
-            hull.push(entries[0].0.clone());
+            hull_idx.push(0);
         }
 
         if xmin == xmax {
-            return hull;
+            return hull_idx.iter().map(|&i| entries[i].0.clone()).collect();
         }
 
         // Find ymaxmin: minimum f at xmax
         let ymaxmin = entries
             .iter()
             .rev()
-            .find(|&&(_, d, _)| {
-                // Find first entry where d == xmax (going backwards, all at end have d==xmax)
-                d == xmax
-            })
-            .map(|&(_, _, _)| {
-                // Actually we need the min f among entries with d == xmax
-                entries
-                    .iter()
-                    .filter(|&&(_, d, _)| d == xmax)
-                    .map(|&(_, _, f)| f)
-                    .fold(f64::INFINITY, f64::min)
-            })
-            .unwrap();
+            .take_while(|&&(_, d, _)| d == xmax)
+            .map(|&(_, _, f)| f)
+            .fold(f64::INFINITY, f64::min);
 
         let minslope = (ymaxmin - yminmin) / (xmax - xmin);
 
-        // Skip entries with x == xmin
         let start_idx = entries
             .iter()
             .position(|&(_, d, _)| d != xmin)
             .unwrap_or(entries.len());
 
-        // Find nmax_start: first entry with d == xmax
         let nmax_start = entries
             .iter()
             .position(|&(_, d, _)| d == xmax)
             .unwrap_or(entries.len());
 
-        // Process entries between xmin and xmax
         let mut i = start_idx;
         while i < nmax_start {
-            let (k, x, y) = entries[i];
+            let (_, x, y) = entries[i];
 
-            // Skip if above the line from (xmin,yminmin) to (xmax,ymaxmin)
             if y > yminmin + (x - xmin) * minslope {
                 i += 1;
                 continue;
             }
 
             // Performance hack: skip vertical lines
-            if !hull.is_empty() && x == hull.last().unwrap().diameter {
-                if y > entries
-                    .iter()
-                    .find(|&&(kk, _, _)| std::ptr::eq(kk, hull.last().unwrap()))
-                    .map(|&(_, _, f)| f)
-                    .unwrap_or(f64::INFINITY)
-                {
-                    // Skip to next diameter value
-                    let cur_d = x;
-                    while i < nmax_start && entries[i].1 == cur_d {
+            if !hull_idx.is_empty() {
+                let last_d = entries[*hull_idx.last().unwrap()].1;
+                if x == last_d {
+                    let last_f = entries[*hull_idx.last().unwrap()].2;
+                    if y > last_f {
+                        let cur_d = x;
+                        while i < nmax_start && entries[i].1 == cur_d {
+                            i += 1;
+                        }
+                        continue;
+                    } else if allow_dups {
+                        hull_idx.push(i);
                         i += 1;
+                        continue;
                     }
-                    continue;
-                } else if allow_dups {
-                    hull.push(k.clone());
-                    i += 1;
-                    continue;
                 }
-                // If equal y and not allow_dups, fall through to hull update
             }
 
-            // Remove points until we make a "left turn" to k
-            while hull.len() > 1 {
-                let t1_d = hull[hull.len() - 1].diameter;
-                let t1_f = hull[hull.len() - 1].f_value;
+            // Remove points until we make a "left turn" to entry i
+            while hull_idx.len() > 1 {
+                let t1_ei = *hull_idx.last().unwrap();
+                let t1_d = entries[t1_ei].1;
+                let t1_f = entries[t1_ei].2;
 
-                // Look backwards for a different point
-                let mut it2 = hull.len() as i64 - 2;
-                let (t2_d, t2_f);
+                let mut it2 = hull_idx.len() as i64 - 2;
                 loop {
                     if it2 < 0 {
                         break;
                     }
-                    let t2_d_cand = hull[it2 as usize].diameter;
-                    let t2_f_cand = hull[it2 as usize].f_value;
+                    let t2_ei = hull_idx[it2 as usize];
+                    let t2_d_cand = entries[t2_ei].1;
+                    let t2_f_cand = entries[t2_ei].2;
                     if t2_d_cand != t1_d || t2_f_cand != t1_f {
                         break;
                     }
@@ -846,38 +837,35 @@ impl CDirect {
                 if it2 < 0 {
                     break;
                 }
-                t2_d = hull[it2 as usize].diameter;
-                t2_f = hull[it2 as usize].f_value;
+                let t2_ei = hull_idx[it2 as usize];
+                let t2_d = entries[t2_ei].1;
+                let t2_f = entries[t2_ei].2;
 
-                // Cross product (t1-t2) × (k-t2) >= 0 means left turn or straight
                 let cross = (t1_d - t2_d) * (y - t2_f) - (t1_f - t2_f) * (x - t2_d);
                 if cross >= 0.0 {
                     break;
                 }
-                hull.pop();
+                hull_idx.pop();
             }
-            hull.push(k.clone());
+            hull_idx.push(i);
             i += 1;
         }
 
         // Add points at (xmax, ymaxmin)
         if allow_dups {
-            for j in nmax_start..entries.len() {
-                let (k, d, f) = entries[j];
+            for (j, &(_, d, f)) in entries[nmax_start..].iter().enumerate() {
                 if d == xmax && f == ymaxmin {
-                    hull.push(k.clone());
+                    hull_idx.push(nmax_start + j);
                 } else if d != xmax {
                     break;
                 }
             }
-        } else {
-            // Find the entry with min f at xmax
-            if let Some(&(k, _, _)) = entries[nmax_start..].iter().find(|&&(_, d, f)| d == xmax && f == ymaxmin) {
-                hull.push(k.clone());
-            }
+        } else if let Some(j) = entries[nmax_start..].iter().position(|&(_, d, f)| d == xmax && f == ymaxmin) {
+            hull_idx.push(nmax_start + j);
         }
 
-        hull
+        // Only clone the keys that are actually on the hull
+        hull_idx.iter().map(|&i| entries[i].0.clone()).collect()
     }
 
     /// Divide potentially optimal rectangles.
@@ -907,21 +895,15 @@ impl CDirect {
             let mut divided_some = false;
             let mut xtol_reached = true;
 
-            // Build hull info: (key, diameter, f_value)
-            let hull_info: Vec<(RectKey, f64, f64)> = hull
-                .iter()
-                .map(|k| (k.clone(), k.diameter, k.f_value))
-                .collect();
-
             let mut i = 0;
             while i < nhull {
                 // Find unequal points before (im) and after (ip)
                 let mut im: i64 = i as i64 - 1;
-                while im >= 0 && hull_info[im as usize].1 == hull_info[i].1 {
+                while im >= 0 && hull[im as usize].diameter == hull[i].diameter {
                     im -= 1;
                 }
                 let mut ip = i + 1;
-                while ip < nhull && hull_info[ip].1 == hull_info[i].1 {
+                while ip < nhull && hull[ip].diameter == hull[i].diameter {
                     ip += 1;
                 }
 
@@ -929,22 +911,22 @@ impl CDirect {
                 let mut k2 = f64::NEG_INFINITY;
 
                 if im >= 0 {
-                    k1 = (hull_info[i].2 - hull_info[im as usize].2)
-                        / (hull_info[i].1 - hull_info[im as usize].1);
+                    k1 = (hull[i].f_value - hull[im as usize].f_value)
+                        / (hull[i].diameter - hull[im as usize].diameter);
                 }
                 if ip < nhull {
-                    k2 = (hull_info[i].2 - hull_info[ip].2)
-                        / (hull_info[i].1 - hull_info[ip].1);
+                    k2 = (hull[i].f_value - hull[ip].f_value)
+                        / (hull[i].diameter - hull[ip].diameter);
                 }
                 let k = k1.max(k2);
 
                 // Potentially optimal test
-                if hull_info[i].2 - k * hull_info[i].1
+                if hull[i].f_value - k * hull[i].diameter
                     <= p.minf - magic_eps * p.minf.abs()
                     || ip == nhull
                 {
                     // Divide this rectangle
-                    let target_key = hull_info[i].0.clone();
+                    let target_key = hull[i].clone();
                     let ret = self.divide_rect_by_key(
                         func,
                         p,

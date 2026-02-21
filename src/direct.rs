@@ -316,6 +316,20 @@ impl Direct {
         }
     }
 
+    /// Evaluate the objective function at a normalized point using a pre-allocated buffer.
+    ///
+    /// Same as `evaluate()` but avoids heap allocation by reusing `x_actual_buf`.
+    #[inline]
+    fn evaluate_with_buf(&self, x_norm: &[f64], x_actual_buf: &mut [f64]) -> (f64, bool) {
+        self.to_actual(x_norm, x_actual_buf);
+        let f = (self.func)(x_actual_buf);
+        if f.is_finite() {
+            (f, true)
+        } else {
+            (f64::MAX, false)
+        }
+    }
+
     // ──────────────────────────────────────────────────────────────────────
     // Initialization — matches direct_dirinit_() in DIRsubrout.c
     // ──────────────────────────────────────────────────────────────────────
@@ -584,6 +598,10 @@ impl Direct {
             // ── Serial path — identical to NLOPT C evaluation order ──
             let mut pos = new_start;
 
+            // Pre-allocate reusable buffers to avoid per-point heap allocation
+            let mut x_norm = vec![0.0; n];
+            let mut x_actual = vec![0.0; n];
+
             // First pass: evaluate all 2*maxi points
             // (matches dirsamplef_ lines 73-133)
             for _j in 0..total {
@@ -596,13 +614,12 @@ impl Direct {
                     continue;
                 }
 
-                // Copy center to temporary buffer
-                let x_norm: Vec<f64> = (0..n)
-                    .map(|i| self.storage.center(pos, i))
-                    .collect();
+                // Copy center to reusable buffer
+                let center_slice = &self.storage.centers[pos * n..(pos + 1) * n];
+                x_norm.copy_from_slice(center_slice);
 
                 // Evaluate (matches dirinfcn_ call in dirsamplef_ line 89)
-                let (f_val, feasible) = self.evaluate(&x_norm);
+                let (f_val, feasible) = self.evaluate_with_buf(&x_norm, &mut x_actual);
                 self.nfev += 1;
 
                 // Check force_stop after evaluation (matches dirsamplef_ lines 91-92)

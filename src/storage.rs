@@ -259,13 +259,14 @@ impl RectangleStorage {
         let n = self.dim;
         debug_assert!(pos >= 1 && pos < self.maxfunc);
 
+        let rect_lengths = &self.lengths[pos * n..(pos + 1) * n];
+
         if jones == 0 {
             // Jones Original
-            let help = self.lengths[pos * n]; // dimension 0 (1-based dim 1 in C)
+            let help = rect_lengths[0]; // dimension 0 (1-based dim 1 in C)
             let mut k = help;
             let mut p = 1i32;
-            for i in 1..n {
-                let len_i = self.lengths[pos * n + i];
+            for &len_i in &rect_lengths[1..] {
                 if len_i < k {
                     k = len_i;
                 }
@@ -280,14 +281,7 @@ impl RectangleStorage {
             }
         } else {
             // Gablonsky: min of all length indices
-            let mut help = self.lengths[pos * n];
-            for i in 1..n {
-                let len_i = self.lengths[pos * n + i];
-                if len_i < help {
-                    help = len_i;
-                }
-            }
-            help
+            rect_lengths.iter().copied().min().unwrap_or(0)
         }
     }
 
@@ -306,12 +300,8 @@ impl RectangleStorage {
         let n = self.dim;
         debug_assert!(pos >= 1 && pos < self.maxfunc);
 
-        let mut help = self.lengths[pos * n];
-        for i in 1..n {
-            let len_i = self.lengths[pos * n + i];
-            help = help.min(len_i);
-        }
-        help
+        let rect_lengths = &self.lengths[pos * n..(pos + 1) * n];
+        rect_lengths.iter().copied().min().unwrap_or(0)
     }
 
     // ──────────────────────────────────────────────────────────────────────
@@ -331,19 +321,16 @@ impl RectangleStorage {
         let n = self.dim;
         debug_assert!(pos >= 1 && pos < self.maxfunc);
 
+        // Use slice access for better cache performance
+        let rect_lengths = &self.lengths[pos * n..(pos + 1) * n];
+
         // Find minimum length
-        let mut help = self.lengths[pos * n];
-        for i in 1..n {
-            let len_i = self.lengths[pos * n + i];
-            if len_i < help {
-                help = len_i;
-            }
-        }
+        let help = rect_lengths.iter().copied().min().unwrap_or(0);
 
         // Collect dimensions with that minimum length
-        let mut arrayi = Vec::new();
-        for i in 0..n {
-            if self.lengths[pos * n + i] == help {
+        let mut arrayi = Vec::with_capacity(n);
+        for (i, &len) in rect_lengths.iter().enumerate() {
+            if len == help {
                 arrayi.push(i + 1); // 1-based, matching NLOPT
             }
         }
@@ -667,6 +654,13 @@ impl RectangleStorage {
         self.centers[idx * self.dim + dim_j]
     }
 
+    /// Get the center coordinate slice for rectangle at 1-based index `idx`.
+    #[inline]
+    pub fn center_slice(&self, idx: usize) -> &[f64] {
+        let start = idx * self.dim;
+        &self.centers[start..start + self.dim]
+    }
+
     /// Set the center coordinate `dim_j` for rectangle at 1-based index `idx`.
     #[inline]
     pub fn set_center(&mut self, idx: usize, dim_j: usize, value: f64) {
@@ -688,17 +682,15 @@ impl RectangleStorage {
     /// Copy center coordinates from rectangle `src` to rectangle `dst`.
     pub fn copy_center(&mut self, dst: usize, src: usize) {
         let n = self.dim;
-        for j in 0..n {
-            self.centers[dst * n + j] = self.centers[src * n + j];
-        }
+        let (src_start, dst_start) = (src * n, dst * n);
+        self.centers.copy_within(src_start..src_start + n, dst_start);
     }
 
     /// Copy length indices from rectangle `src` to rectangle `dst`.
     pub fn copy_lengths(&mut self, dst: usize, src: usize) {
         let n = self.dim;
-        for j in 0..n {
-            self.lengths[dst * n + j] = self.lengths[src * n + j];
-        }
+        let (src_start, dst_start) = (src * n, dst * n);
+        self.lengths.copy_within(src_start..src_start + n, dst_start);
     }
 
     /// Remove a rectangle from its anchor list.
