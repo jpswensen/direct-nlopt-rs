@@ -533,19 +533,29 @@ impl Direct {
 
     /// Evaluate objective function at all new sample points.
     ///
-    /// Matches `direct_dirsamplef_()` in DIRserial.c (lines 17-150).
+    /// Matches `direct_dirsamplef_()` in DIRserial.c (lines 17–150).
     ///
     /// Two passes:
     /// 1. Evaluate all 2×maxi points, tracking fmax and setting feasibility flags
     /// 2. Update minf/minpos for feasible points only
     ///
-    /// When `options.parallel` is `true`, evaluations are performed in parallel
-    /// using rayon. The storage updates remain sequential.
+    /// # Parallelization
+    ///
+    /// When `options.parallel` is `true` and the point count meets
+    /// `min_parallel_evals`, evaluations are performed in parallel using rayon.
+    /// All coordinates are collected first, evaluated concurrently, then results
+    /// are applied to storage in the same sequential order as the serial path.
+    /// This preserves bit-identical results regardless of thread scheduling.
+    ///
+    /// When `options.parallel` is `false`, evaluation order is identical to
+    /// NLOPT C: positive offset first, then negative, for each dimension.
     ///
     /// # Force-stop handling
-    /// Matches NLOPT's `force_stop` check in `direct_dirsamplef_()` (lines 86-92, 124-126):
-    /// - If `force_stop` is set, the function value is set to `fmax` and the
-    ///   feasibility flag is set to -1.0 (setup error), matching `kret = -1`.
+    ///
+    /// Matches NLOPT's `force_stop` check in `direct_dirsamplef_()` (DIRserial.c
+    /// lines 86–92, 124–126): if `force_stop` is set, the function value is set
+    /// to `fmax` and the feasibility flag is set to -1.0 (setup error), matching
+    /// `kret = -1`.
     ///
     /// # Arguments
     /// * `new_start` — 1-based index of first new rectangle in chain
@@ -706,11 +716,22 @@ impl Direct {
     /// Evaluate ALL sample points from multiple selected rectangles in one
     /// parallel batch, then divide and insert each rectangle sequentially.
     ///
-    /// This is an optimization over the default per-rectangle loop:
-    /// instead of (sample → evaluate → divide) per rect, we do:
-    /// 1. For each selected rect: remove from list, get longest dims, create sample points
-    /// 2. Evaluate ALL sample points across all rects in one parallel batch
-    /// 3. For each rect: divide and insert children
+    /// # Deviation from NLOPT C
+    ///
+    /// NLOPT C processes each selected rectangle sequentially in the main loop
+    /// of `direct_direct_()` (DIRect.c lines 490–572): for each rectangle it
+    /// calls `dirsamplepoints_()` → `dirsamplef_()` → `dirdivide_()` →
+    /// `dirinsertlist_()` before moving to the next rectangle.
+    ///
+    /// This batch mode collects ALL sample points from ALL selected rectangles
+    /// first, evaluates them in one parallel batch using rayon, then processes
+    /// division and insertion sequentially for each rectangle.
+    ///
+    /// # Parallelization impact
+    ///
+    /// Function evaluations may occur in a different order than NLOPT C, but
+    /// the final results are deterministic and bit-identical to the serial path
+    /// because storage updates are applied in the same sequential order.
     ///
     /// Returns `Some(DirectReturnCode)` if a termination condition was hit.
     fn process_selected_rects_batch(
@@ -1005,6 +1026,10 @@ impl Direct {
 
     /// Get the algorithm method flag (jones parameter) for Gablonsky functions.
     ///
+    /// Matches NLOPT's `jones` parameter passed throughout DIRect.c and DIRsubrout.c:
+    /// - `jones == 0` → DIRECT_ORIGINAL (algmethod=0, Jones 1993)
+    /// - `jones == 1` → DIRECT_GABLONSKY (algmethod=1, Gablonsky 2001 / DIRECT-L)
+    ///
     /// Returns 0 for Original, 1 for Gablonsky (locally biased).
     pub fn jones(&self) -> i32 {
         self.options.algorithm.algmethod().unwrap_or(1)
@@ -1016,7 +1041,8 @@ impl Direct {
 
     /// Run the full DIRECT optimization.
     ///
-    /// Matches `direct_direct_()` in DIRect.c (lines 449–768) exactly.
+    /// Matches `direct_direct_()` in DIRect.c (lines 47–768), called via
+    /// `direct_optimize()` in direct_wrap.c (line 43).
     ///
     /// # Algorithm Flow
     ///
@@ -1037,6 +1063,15 @@ impl Direct {
     ///    - e. `replace_infeasible()` — replace infeasible point values
     ///    - f. Epsilon update (Jones formula)
     /// 4. Extract best point and build `DirectResult`
+    ///
+    /// # Deviations from NLOPT C
+    ///
+    /// - When `options.parallel_batch` is `true`, step 3c is replaced by
+    ///   `process_selected_rects_batch()` which collects all sample points
+    ///   across all selected rectangles and evaluates them in one parallel
+    ///   batch. The final results remain identical to the serial path.
+    /// - Memory uses `Vec` (growable) rather than C's fixed-size arrays, so
+    ///   `MAXFUNC` acts as an initial capacity rather than a hard limit.
     ///
     /// # Callback
     ///

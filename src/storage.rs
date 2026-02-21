@@ -159,7 +159,7 @@ impl RectangleStorage {
 
     /// Precompute thirds[k] = 1/3^k for k = 0..maxdeep.
     ///
-    /// Matches the thirds precomputation in `direct_dirinit_()` (DIRsubrout.c):
+    /// Matches the thirds precomputation in `direct_dirinit_()` (DIRsubrout.c lines 1208–1213):
     /// ```c
     /// thirds[0] = 1.;
     /// help2 = 3.;
@@ -181,7 +181,7 @@ impl RectangleStorage {
 
     /// Precompute levels[] for depth characterization.
     ///
-    /// Matches the levels precomputation in `direct_dirinit_()` (DIRsubrout.c).
+    /// Matches the levels precomputation in `direct_dirinit_()` (DIRsubrout.c lines 1215–1243).
     ///
     /// For `jones == 1` (algmethod=1, Gablonsky DIRECT-L):
     /// ```c
@@ -344,6 +344,9 @@ impl RectangleStorage {
 
     /// Allocate a rectangle slot from the free list.
     ///
+    /// No single NLOPT C function — this logic is inlined wherever `ifree` is consumed
+    /// (e.g., `dirsamplepoints_()` in DIRsubrout.c lines 903–922).
+    ///
     /// Returns the 1-based index of the allocated slot, or `None` if the free list is empty.
     pub fn alloc_rect(&mut self) -> Option<usize> {
         if self.free == 0 {
@@ -356,6 +359,9 @@ impl RectangleStorage {
     }
 
     /// Return a rectangle slot to the free list.
+    ///
+    /// Inverse of `alloc_rect()`. No single NLOPT C function — this is inlined
+    /// in the C code wherever rectangles are reclaimed.
     ///
     /// # Arguments
     /// * `idx` — 1-based rectangle index to free
@@ -630,12 +636,17 @@ impl RectangleStorage {
     // ──────────────────────────────────────────────────────────────────────
 
     /// Get the function value for rectangle at 1-based index `idx`.
+    ///
+    /// Equivalent to `f[(idx << 1) + 1]` (column 1) in NLOPT's Fortran-style `f` array.
     #[inline]
     pub fn f_val(&self, idx: usize) -> f64 {
         self.f_values[idx * 2]
     }
 
     /// Get the feasibility flag for rectangle at 1-based index `idx`.
+    ///
+    /// Equivalent to `f[(idx << 1) + 2]` (column 2) in NLOPT's Fortran-style `f` array.
+    /// Values: 0.0 = feasible, 1.0 = replaced, 2.0 = infeasible.
     #[inline]
     pub fn f_flag(&self, idx: usize) -> f64 {
         self.f_values[idx * 2 + 1]
@@ -680,6 +691,8 @@ impl RectangleStorage {
     }
 
     /// Copy center coordinates from rectangle `src` to rectangle `dst`.
+    ///
+    /// Matches the array copy in `direct_dirsamplepoints_()` (DIRsubrout.c lines 906–909).
     pub fn copy_center(&mut self, dst: usize, src: usize) {
         let n = self.dim;
         let (src_start, dst_start) = (src * n, dst * n);
@@ -687,13 +700,18 @@ impl RectangleStorage {
     }
 
     /// Copy length indices from rectangle `src` to rectangle `dst`.
+    ///
+    /// Matches the array copy in `direct_dirsamplepoints_()` (DIRsubrout.c lines 910–913).
     pub fn copy_lengths(&mut self, dst: usize, src: usize) {
         let n = self.dim;
         let (src_start, dst_start) = (src * n, dst * n);
         self.lengths.copy_within(src_start..src_start + n, dst_start);
     }
 
-    /// Remove a rectangle from its anchor list.
+    /// Remove a rectangle from the head of its anchor list.
+    ///
+    /// Matches the anchor removal in `direct_direct_()` (DIRect.c lines 546–554)
+    /// for the case where the rectangle is the anchor head.
     ///
     /// Assumes the rectangle is at the head of its anchor list
     /// (which is the case when processing selected rectangles in the main loop).

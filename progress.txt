@@ -2256,3 +2256,50 @@
 - README.md includes working code examples (not tested as doc tests since they're markdown)
 - DIFFERENCES.md explicitly documents the replicated dirreplaceinf_ bug for transparency
 - The documentation task is now complete; only the inline documentation task remains
+
+
+## Iteration 50 — Add inline NLOPT C correspondence documentation (2026-02-21)
+
+### What was implemented
+- Added inline doc comments to every public function in storage.rs, direct.rs, and cdirect.rs
+  citing the exact NLOPT C function name, source file, and line numbers
+- storage.rs: added NLOPT C references to `alloc_rect()`, `free_rect()`, `remove_from_anchor()`,
+  `f_val()`, `f_flag()`, `copy_center()`, `copy_lengths()`; added line numbers to
+  `precompute_thirds()` (DIRsubrout.c lines 1208–1213) and `precompute_levels()` (lines 1215–1243)
+- direct.rs: enhanced `minimize()` docs with DIRect.c line 47 reference, documented deviations
+  from NLOPT C (parallel_batch mode, Vec vs fixed-size arrays); enhanced `evaluate_sample_points()`
+  with parallelization impact documentation; enhanced `jones()` with algmethod mapping;
+  enhanced `process_selected_rects_batch()` with deviation documentation and parallelization
+  impact details
+- cdirect.rs: enhanced `CDirect` struct docs with NLOPT C entry points and deviation notes
+  (BTreeMap vs rb_tree, no infeasible handling); enhanced `CDirectParams` with base-3 encoding
+  docs (lines 490–493); enhanced `minimize()` with dispatch docs; enhanced `optimize_scaled()`
+  with cdirect_uf() reference (line 555); enhanced `rect_diameter()` with float-rounding trick
+  docs (lines 103/109); enhanced `divide_rect_by_key()` with Path A/Path B docs; enhanced
+  `convex_hull()` with monotone chain performance hack docs; enhanced `divide_good_rects()`
+  with epsilon test and fallback docs; enhanced `function_eval()` with behavior details
+- Fixed clippy doc_lazy_continuation warning introduced by list formatting change
+
+### Files modified
+- direct-nlopt-rs/src/storage.rs (added NLOPT C references to 9 functions)
+- direct-nlopt-rs/src/direct.rs (enhanced docs for 5 functions with C line numbers and deviations)
+- direct-nlopt-rs/src/cdirect.rs (enhanced docs for 8 functions/structs with C line numbers and deviations)
+- plans/prd-direct-nlopt.json (marked inline documentation as passes: true)
+
+### Git commits
+- `615e76b` docs(inline): add NLOPT C correspondence to every function in storage/direct/cdirect
+
+### Test results
+- All 251 tests pass (207 lib + 41 integration + 3 doc-tests)
+- No regressions
+- Clippy: only pre-existing warnings, no new issues
+
+### Notes
+- All 54 PRD items now have passes: true — the project is COMPLETE
+- Every public function across storage.rs, direct.rs, and cdirect.rs now has a doc comment
+  citing the specific NLOPT C function, source file, and line numbers
+- Deviations from NLOPT C are documented: parallel batch evaluation, BTreeMap vs rb_tree,
+  Vec vs fixed arrays, replicated dirreplaceinf_ bug, no infeasible handling in cdirect
+- Parallelization points documented: evaluate_sample_points() (per-rect parallel),
+  process_selected_rects_batch() (cross-rect batch parallel), and their impact on
+  evaluation order (different order but bit-identical final results)

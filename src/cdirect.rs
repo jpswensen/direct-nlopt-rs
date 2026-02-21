@@ -153,7 +153,13 @@ impl Ord for RectKey {
 // CDirectParams: internal algorithm parameters
 // ──────────────────────────────────────────────────────────────────────────────
 
-/// Internal parameters matching the `params` struct in cdirect.c.
+/// Internal parameters matching the `params` struct in cdirect.c (lines 55–82).
+///
+/// The `which_alg` integer is decomposed into three sub-flags using base-3
+/// encoding (cdirect.c lines 490–493):
+/// - `which_diam = which_alg % 3` — diameter measure (0=Jones Euclidean, 1=Gablonsky max-side)
+/// - `which_div  = (which_alg / 3) % 3` — division strategy (0=all longest, 1=Gablonsky, 2=random)
+/// - `which_opt  = (which_alg / 9) % 3` — hull selection (0=all hull pts, 1=one per diameter, 2=randomized)
 #[allow(dead_code)]
 struct CDirectParams {
     n: usize,
@@ -209,6 +215,19 @@ impl CDirectParams {
 /// This struct provides the public API for running any of the cdirect-based
 /// NLOPT algorithm variants (DIRECT, DIRECT-L, DIRECT-L-RAND, and their
 /// unscaled counterparts).
+///
+/// # NLOPT C Correspondence
+///
+/// The public entry point `minimize()` dispatches to either:
+/// - `optimize_scaled()` → `cdirect()` in cdirect.c (line 569)
+/// - `optimize_unscaled()` → `cdirect_unscaled()` in cdirect.c (line 476)
+///
+/// # Deviation from NLOPT C
+///
+/// - Uses `BTreeMap<RectKey, HyperRect>` instead of NLOPT's `rb_tree` (red-black tree).
+///   The ordering semantics are identical via `RectKey::cmp()`.
+/// - Does not handle infeasible points (NaN/Inf) — matching cdirect.c behavior,
+///   which unlike the Gablonsky translation has no `dirreplaceinf_()` equivalent.
 pub struct CDirect {
     func: ArcObjFn,
     bounds: Bounds,
@@ -241,6 +260,9 @@ impl CDirect {
     }
 
     /// Run the optimizer, dispatching to scaled or unscaled variant.
+    ///
+    /// Matches `cdirect()` (scaled, cdirect.c line 569) or `cdirect_unscaled()`
+    /// (unscaled, cdirect.c line 476) depending on the algorithm variant.
     pub fn minimize(&self) -> Result<DirectResult> {
         let n = self.bounds.len();
         if n == 0 {
@@ -271,7 +293,11 @@ impl CDirect {
 
     /// Scaled variant: maps bounds to [0,1]^n then calls optimize_unscaled.
     ///
-    /// Matches `cdirect()` in cdirect.c lines 569–603.
+    /// Matches `cdirect()` in cdirect.c (lines 569–603).
+    ///
+    /// Wraps the user's objective function with an unscaling transform
+    /// (`cdirect_uf()` in cdirect.c line 555): `x_actual = lb + xu * (ub - lb)`.
+    /// After optimization, the result point is unscaled back to original coordinates.
     fn optimize_scaled(&self, n: usize, which_alg: i32) -> Result<DirectResult> {
         let lb: Vec<f64> = self.bounds.iter().map(|&(lo, _)| lo).collect();
         let ub: Vec<f64> = self.bounds.iter().map(|&(_, hi)| hi).collect();
@@ -482,7 +508,9 @@ impl CDirect {
 
     /// Evaluate the objective function and update min tracking.
     ///
-    /// Matches `function_eval()` in cdirect.c lines 136–144.
+    /// Matches `function_eval()` in cdirect.c (lines 136–144).
+    /// Updates `p.minf` and `p.xmin` if a new minimum is found.
+    /// Increments `p.nfev` unconditionally.
     fn function_eval(
         func: &ArcObjFn,
         x: &[f64],
@@ -499,8 +527,14 @@ impl CDirect {
 
     /// Compute the rectangle diameter measure.
     ///
-    /// Matches `rect_diameter()` in cdirect.c lines 94–112.
-    /// Rounds to f32 precision to group rectangles by diameter level.
+    /// Matches `rect_diameter()` in cdirect.c (lines 94–112).
+    ///
+    /// - `which_diam == 0` (Jones): Euclidean half-diagonal `sqrt(sum(w_i^2)) / 2`
+    /// - `which_diam == 1` (Gablonsky): half-width of longest side `max(w_i) / 2`
+    ///
+    /// Both paths cast to `f32` then back to `f64` — this float-rounding trick
+    /// (cdirect.c line 103/109) groups rectangles by diameter level, which is
+    /// essential for convex_hull() performance.
     fn rect_diameter(n: usize, w: &[f64], which_diam: i32) -> f64 {
         if which_diam == 0 {
             // Jones measure: Euclidean distance from center to vertex
@@ -515,7 +549,15 @@ impl CDirect {
 
     /// Divide a rectangle identified by its key.
     ///
-    /// Matches `divide_rect()` in cdirect.c lines 152–243.
+    /// Matches `divide_rect()` in cdirect.c (lines 152–243).
+    ///
+    /// Two division paths:
+    /// - **Path A** (lines 169–208): `which_div == 1` (Gablonsky) or all sides equal.
+    ///   Trisects all longest sides in order of min(f+, f-). Evaluates all 2×nlongest
+    ///   children first via `sort_fv()`, then creates and inserts them sorted.
+    /// - **Path B** (lines 210–241): `which_div == 0` (Jones) with non-cube rect.
+    ///   Trisects only one longest side (or random among longest if `which_div == 2`).
+    ///   Evaluates children during creation.
     fn divide_rect_by_key(
         &self,
         func: &ArcObjFn,
@@ -725,7 +767,17 @@ impl CDirect {
 
     /// Find the lower convex hull of rectangles sorted by (diameter, f_value).
     ///
-    /// Matches `convex_hull()` in cdirect.c lines 261–378.
+    /// Matches `convex_hull()` in cdirect.c (lines 261–378).
+    ///
+    /// Uses a monotone chain algorithm with two performance hacks from NLOPT:
+    /// 1. Points above the line from (xmin, yminmin) to (xmax, ymaxmin) are
+    ///    skipped immediately (cdirect.c line 302).
+    /// 2. Vertical lines (duplicate diameters) are handled by keeping only the
+    ///    entry with the lowest f-value at each diameter level (cdirect.c line 319).
+    ///
+    /// When `allow_dups` is true (DIRECT Original, `which_opt != 1`), all entries
+    /// at xmin with f == yminmin are included on the hull. When false (DIRECT-L),
+    /// only one entry per diameter level is kept.
     ///
     /// Returns keys of hull points in order from smallest to largest diameter.
     fn convex_hull(rtree: &BTreeMap<RectKey, HyperRect>, allow_dups: bool) -> Vec<RectKey> {
@@ -870,7 +922,18 @@ impl CDirect {
 
     /// Divide potentially optimal rectangles.
     ///
-    /// Matches `divide_good_rects()` in cdirect.c lines 392–458.
+    /// Matches `divide_good_rects()` in cdirect.c (lines 392–458).
+    ///
+    /// For each point on the convex hull, computes the maximum slope `k` to
+    /// adjacent hull points (cdirect.c lines 414–424), then applies the
+    /// epsilon test: `f - k*d <= minf - eps*|minf|` (cdirect.c line 427).
+    /// Rectangles passing this test are divided via `divide_rect_by_key()`.
+    ///
+    /// If no rectangles qualify (even with eps=0), falls back to dividing the
+    /// largest rectangle with the smallest f-value (cdirect.c lines 442–454).
+    ///
+    /// For DIRECT-L (`which_opt == 1`), skips to the next distinct diameter
+    /// after processing each hull point (cdirect.c line 436).
     ///
     /// Returns Ok(true) if xtol reached, Ok(false) if normal, Err(code) on stop/error.
     fn divide_good_rects(
