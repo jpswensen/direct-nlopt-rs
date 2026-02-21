@@ -1192,3 +1192,41 @@
   the full NLOPT redblack.c infrastructure; this tests the same algorithm faithfully
 - Gablonsky diameter does NOT decrease when dividing one dimension of a square rectangle
   (max side stays the same), so the subdivision test uses >= instead of >
+
+
+## Iteration 25 — End-to-end Sphere DIRECT_GABLONSKY Comparison (2026-02-21)
+
+### What was implemented
+- Created comprehensive end-to-end comparison test for sphere function with DIRECT_GABLONSKY
+- Tests compare NLOPT C `direct_optimize()` vs Rust `Direct::minimize()` with
+  `DirectAlgorithm::GablonskyLocallyBiased` for IDENTICAL results (not approximate)
+- Test configurations: maxiter=20, maxiter=50, maxfeval=500, 3D, parallel=false, asymmetric bounds
+- Fixed off-by-one in main iteration loop: C uses `for (t=2; t<=maxt; t++)` (DIRect.c line 449)
+  but Rust had `for t in 2..=(maxt+1)` giving one extra iteration. Changed to `for t in 2..=maxt`
+- Fixed final result extraction floating-point formula to match C exactly:
+  C (DIRect.c line 734): `x[i] = c[i]*l[i] + l[i]*u[i]` (where l=xs1, u=xs2 after dirpreprc_ aliasing)
+  Rust was using `(center + xs2) * xs1` (matching dirinfcn_ intermediate formula);
+  changed to `center * xs1 + xs1 * xs2` to match C's final extraction order
+- All 6 new tests verify bit-identical x, minf, and nfev between C and Rust
+- Function evaluation counting in C uses AtomicUsize via callback data pointer
+
+### Files created
+- direct-nlopt-rs/tests/test_sphere_gablonsky_comparison.rs
+
+### Files modified
+- direct-nlopt-rs/src/direct.rs (loop bound fix: 2..=maxt; final extraction formula fix)
+- plans/prd-direct-nlopt.json (marked sphere GABLONSKY integration test as passes: true)
+
+### Git commits
+- `902d7be` test(integration): add end-to-end sphere DIRECT_GABLONSKY comparison vs NLOPT C
+
+### Test results
+- All existing tests continue to pass (no regressions)
+
+### Notes
+- The intermediate evaluation formula (dirinfcn_) uses `(x + xs2) * xs1` in both C and Rust
+- The final result extraction (DIRect.c line 734) uses a different formula `c*xs1 + xs1*xs2`
+  due to the in-place aliasing of l→xs1 and u→xs2 in dirpreprc_
+- Both formulas are mathematically equivalent but differ in floating-point rounding
+- For symmetric bounds [-5,5] both formulas give exactly 0.0 (no rounding difference)
+- For asymmetric bounds the difference was ~1e-16 relative, fixed by matching C order

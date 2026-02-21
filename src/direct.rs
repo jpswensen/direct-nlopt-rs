@@ -861,8 +861,9 @@ impl Direct {
         // Return code (matches NLOPT's ierror)
         let mut return_code: Option<DirectReturnCode> = None;
 
-        // Step 3: Main loop (DIRect.c lines 449-668)
-        for t in 2..=(maxt + 1) {
+        // Step 3: Main loop (DIRect.c lines 448-449: i__1 = *maxt; for (t = tstart; t <= i__1; ++t))
+        // tstart=2, loop goes from t=2 to t=maxt inclusive
+        for t in 2..=maxt {
             self.nit = t - 1;
 
             // 3a. Select potentially optimal rectangles (dirchoose_)
@@ -1063,13 +1064,16 @@ impl Direct {
         // (DIRect.c line 720)
         let return_code = return_code.unwrap_or(DirectReturnCode::MaxIterExceeded);
 
-        // Step 4: Extract best point (DIRect.c lines 723-731)
-        // Formula: x[i] = (center[minpos, i] + xs2[i]) * xs1[i] = to_actual(center)
-        let x_best: Vec<f64> = (0..self.dim)
-            .map(|i| self.storage.center(self.minpos, i))
+        // Step 4: Extract best point (DIRect.c lines 732-735)
+        // C formula: x[i] = c[minpos,i] * l[i] + l[i] * u[i]
+        // where l[i]=xs1[i] and u[i]=xs2[i] after dirpreprc_ aliasing.
+        // This differs in floating-point order from to_actual's (c+xs2)*xs1.
+        let x_actual: Vec<f64> = (0..self.dim)
+            .map(|i| {
+                let c = self.storage.center(self.minpos, i);
+                c * self.xs1[i] + self.xs1[i] * self.xs2[i]
+            })
             .collect();
-        let mut x_actual = vec![0.0; self.dim];
-        self.to_actual(&x_best, &mut x_actual);
 
         Ok(crate::types::DirectResult::new(
             x_actual,
