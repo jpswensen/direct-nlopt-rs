@@ -37,6 +37,7 @@
 //! - NLOPT: <https://github.com/stevengj/nlopt>
 
 pub mod error;
+pub mod storage;
 pub mod types;
 
 // Re-export main types

@@ -312,3 +312,58 @@
 - DIRECT_UNKNOWN_FGLOBAL maps to f64::NEG_INFINITY matching C's -HUGE_VAL
 - sigma_reltol defaults to -1.0 (disabled) matching nlopt_get_param(opt, "sigma_reltol", -1.0)
 - volume_reltol defaults to 0.0, but NLOPT internally converts <=0 to -1 in direct_wrap.c
+
+
+## Iteration 3 — Implement storage.rs: SoA Rectangle Storage (2026-02-21)
+
+### What was implemented
+- Created `src/storage.rs` implementing `RectangleStorage` struct with SoA layout matching
+  NLOPT's Gablonsky Fortran→C translation data structures from DIRect.c and DIRsubrout.c
+- `RectangleStorage::new()` — memory allocation matching NLOPT's formulas:
+  MAXFUNC = maxf <= 0 ? 101000 : (maxf + 1000 + maxf/2),
+  MAXDEEP = maxt <= 0 ? MAXFUNC/5 : (maxt + 1000)
+- `init_lists()` — matches `direct_dirinitlist_()`: zeroes anchors[-1..maxdeep],
+  chains point[] as free list (1→2→...→maxfunc-1→0), zeroes f_values
+- `precompute_thirds()` — computes thirds[k] = 1/3^k for k=0..maxdeep
+- `precompute_levels()` — computes levels[] for both jones=0 (Original: w[j]/3^(i-1)
+  where w[j]=sqrt(n-j+j/9)*0.5) and jones=1 (Gablonsky: 1/3^k)
+- `get_level()` — matches `direct_dirgetlevel_()` exactly:
+  jones=1 returns min(lengths), jones=0 returns k*n+p encoding
+- `get_max_deep()` — matches `direct_dirgetmaxdeep_()`: returns min of length indices
+- `get_longest_dims()` — matches `direct_dirget_i__()`: finds all dimensions with
+  minimum length index, returns 1-based indices and count
+- `insert_into_list()` — matches `direct_dirinsertlist_()`: inserts maxi pairs of
+  child rectangles plus parent into anchor-linked lists sorted by f-value at computed depth
+- `insert_sorted()` — matches `dirinsert_()`: sorted insertion helper
+- `alloc_rect()` / `free_rect()` — free list allocation/deallocation
+- `replace_infeasible()` — matches `direct_dirreplaceinf_()`: scans for infeasible points,
+  checks bounding box of each rectangle for nearby feasible points, replaces f-value
+  with min nearby feasible + 1e-6 perturbation, or sets to max(fmax+1, f)
+- `resort_list()` — matches `dirresortlist_()`: removes and re-inserts rectangle after
+  f-value replacement to maintain sorted order
+- Helper accessors: f_val(), f_flag(), set_f(), center(), set_center(), length(),
+  set_length(), copy_center(), copy_lengths(), remove_from_anchor()
+- 21 unit tests covering all functions
+
+### Files created
+- direct-nlopt-rs/src/storage.rs
+
+### Files modified
+- direct-nlopt-rs/src/lib.rs (added `pub mod storage`)
+- plans/prd-direct-nlopt.json (marked storage.rs task as passes: true)
+
+### Git commits
+- `a9acb4f` feat(storage): implement SoA rectangle storage with linked-list management
+
+### Test results
+- 42 tests passed, 0 failed (+21 new storage tests)
+- All clippy warnings resolved
+
+### Notes
+- Uses 1-based indexing internally to match NLOPT's Fortran-translated C code
+- Index 0 is unused in point/anchor arrays; 0 serves as null sentinel
+- anchor array offset: anchor[depth+1] maps to NLOPT's anchor[depth] with -1 → index 0
+- replace_infeasible uses xs1/xs2 params (currently prefixed with _ since only used
+  in the unscaling step of dirresortlist_ which is delegated to direct.rs)
+- The insert_into_list function faithfully reproduces the complex sorting logic from
+  DIRsubrout.c including all 6 comparison branches for the pos1/pos2 pair insertion
