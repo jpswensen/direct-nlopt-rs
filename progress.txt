@@ -871,3 +871,45 @@
 - NLOPT C rosenbrock 2D GABLONSKY: x=[0.9999999997132019, 0.9999999993945377], minf=1.84e-19
 - Rust rosenbrock 2D GABLONSKY: x=[0.9999999997132014, 0.9999999993945374], minf=1.84e-19 — nearly identical (last digits differ slightly)
 - This harness enables all subsequent comparison tests to verify Rust vs C equivalence
+
+
+## Iteration 17 — Comparative Unit Tests for Scaling/Unscaling (2026-02-21)
+
+### What was implemented
+- Created comparative unit tests that call NLOPT C `direct_dirpreprc_()` and `direct_dirinfcn_()` via FFI
+  and verify that the Rust implementation produces identical results
+- Added FFI declarations for `direct_dirpreprc_` (DIRsubrout.c:1403) and `direct_dirinfcn_` (DIRsubrout.c:1048)
+  which were already compiled via build.rs but not previously exposed in test code
+- Tests cover all PRD-specified scenarios:
+  - Symmetric bounds [-5,5]: verified xs1=10, xs2=-0.5 in both C and Rust (bit-identical)
+  - Asymmetric bounds [2,10]: verified xs1=8, xs2=0.25 in both C and Rust (bit-identical)
+  - Near-zero bounds [0,1]: verified xs1=1, xs2=0 in both C and Rust (bit-identical)
+  - Multi-dimensional bounds (3D): verified all xs1/xs2 values match
+  - Invalid bounds: verified both C (oops=1) and Rust (Err) reject u<=l
+  - Extreme bounds: [-1e10,1e10] and [0,1e-10] verified identical
+- Roundtrip tests verify C's dirinfcn_ rescaling: x_norm → unscale → evaluate → rescale → x_norm
+  matches Rust's to_actual/to_normalized roundtrip for 12 test configurations
+- Algebraic equivalence test: verified (x+xs2)*xs1 == x*xs1+l using C-computed xs1/xs2
+  for 6 bounds configurations × 5 normalized x values
+- Bit-identical f-value comparison: C dirinfcn_(sphere) vs Rust evaluate(sphere) for
+  6 bounds configurations × multiple sample points (1D grid, 2D grid, 3D corners)
+
+### Files created
+- tests/test_scaling_compare.rs (13 comparative unit tests)
+
+### Files modified
+- plans/prd-direct-nlopt.json (marked scaling/unscaling test-unit as passes: true)
+
+### Git commits
+- `95fdace` test(direct): add comparative scaling/unscaling tests vs NLOPT C dirpreprc_ and dirinfcn_
+
+### Test results
+- 209 tests passed, 0 failed (+13 new tests)
+  - 188 lib tests, 6 nlopt_ffi tests, 13 scaling_compare tests, 2 doc-tests
+- No regressions
+
+### Notes
+- All 13 C-vs-Rust comparisons produce bit-identical results for xs1, xs2, and f-values
+- The C function uses Fortran-style 1-based indexing via pointer decrements; the FFI
+  wrapper handles this transparently by passing standard 0-based Rust arrays
+- The C dirinfcn_ mutates x in-place (unscale, call, rescale), verified via roundtrip test
