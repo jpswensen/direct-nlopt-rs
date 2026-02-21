@@ -961,3 +961,34 @@
   the minimum length (k) and the count of dimensions equal to the first dimension's
   length (p), producing a finer-grained level that distinguishes rectangle shapes
 - Gablonsky (jones=1) simply returns min(all lengths), same as get_max_deep()
+
+
+## Iteration 19 — Comparative Unit Tests for thirds[] and levels[] Precomputation (2026-02-21)
+
+### What was implemented
+- Created comparative unit tests verifying bit-identical output between Rust `precompute_thirds()` / `precompute_levels()` and the NLOPT C computation from `direct_dirinit_()` (DIRsubrout.c lines 1208-1243)
+- Added C shim helper functions `nlopt_shim_precompute_thirds()` and `nlopt_shim_precompute_levels()` to nlopt-shim/nlopt_util_shim.c, extracting the exact computation loops from `direct_dirinit_()`
+- Tests verify thirds[k] = 1/3^k for k=0..50 with bit-exact comparison (using `to_bits()`)
+- Tests verify levels[] for both jones=0 (Jones Original) and jones=1 (Gablonsky DIRECT-L)
+- Tested with n=2, 3, 5 dimensions and maxdeep=50
+- Verified Gablonsky levels are dimension-independent and identical to thirds
+- Verified Jones Original levels depend on n and follow w[j] = sqrt(n - j + j/9) * 0.5 formula
+- Added monotonicity and positivity property tests
+
+### Files created
+- direct-nlopt-rs/tests/test_thirds_levels_compare.rs (21 tests)
+
+### Files modified
+- direct-nlopt-rs/nlopt-shim/nlopt_util_shim.c (added thirds/levels precomputation helpers)
+- plans/prd-direct-nlopt.json (marked thirds/levels precomputation tests as passes: true)
+
+### Git commits
+- `8a9372d` test(storage): add comparative thirds/levels precomputation tests vs NLOPT C
+  - 188 lib tests, 6 nlopt_ffi tests, 19 level_compare tests, 13 scaling_compare tests, 21 thirds_levels_compare tests, 2 doc-tests
+- No regressions
+
+### Notes
+- All 21 tests use bit-exact comparison (`to_bits()`) confirming the Rust implementation produces IEEE 754 identical results to the C code
+- For jones=0 (Jones Original), only indices 0..(maxdeep/n)*n are populated — unfilled entries remain zero
+- For jones=1 (Gablonsky), the levels array is identical to thirds and is dimension-independent
+- The C shim approach avoids the complexity of calling full `direct_dirinit_()` which requires objective function setup
