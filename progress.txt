@@ -1302,3 +1302,34 @@
 - DIRECT_ORIGINAL with very high iteration counts can overflow MAXDIV (5000) due to many equal-valued rectangles in flat regions
 - This is a known limitation documented in NLOPT's source code ("Increase maxdiv or use our modification (Jones = 1)")
 - Asymmetric bounds tests confirm scaling faithfulness for both algorithm variants
+
+
+## Iteration 28 — End-to-End Rastrigin Comparison Tests (2026-02-21)
+
+### What was implemented
+- Created end-to-end comparison tests for the Rastrigin function (multimodal) against NLOPT C
+- Rastrigin f(x) = 10*n + sum[x_i^2 - 10*cos(2*pi*x_i)], global min at origin, f(x*)=0
+- Tests cover 2D and 3D with both DIRECT_GABLONSKY and DIRECT_ORIGINAL algorithm variants
+- All tests verify IDENTICAL results (x, minf, nfev) between NLOPT C and Rust — bit-exact match
+- Test configurations: maxfeval=5000, maxfeval=1000, eps=1e-4, eps=1e-6
+- Cross-variant consistency tests verify each Rust variant matches its own C counterpart
+- Rastrigin's many local minima stress-test the global exploration properties of DIRECT
+
+### Files created
+- tests/test_rastrigin_comparison.rs (12 new Rastrigin comparison tests)
+
+### Files modified
+- plans/prd-direct-nlopt.json (marked Rastrigin integration test as passes: true)
+
+### Git commits
+- `6fe46c5` test(integration): add end-to-end Rastrigin comparison vs NLOPT C for both algorithm variants
+
+### Test results
+- 403 tests passed, 0 failed (+12 new Rastrigin comparison tests)
+- All 12 Rastrigin tests produce IDENTICAL results to NLOPT C (bit-exact x, minf, nfev)
+- No regressions in existing tests
+
+### Notes
+- Rastrigin function has ~10*n local minima per dimension, making it a challenging multimodal test
+- Both 2D and 3D configurations confirm faithful behavior across dimensions
+- The Rastrigin function was already defined in nlopt_ffi.rs (rastrigin_c) from the test foundation setup
