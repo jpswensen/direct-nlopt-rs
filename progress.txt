@@ -45,3 +45,50 @@
 - Both codepaths must produce identical results to their NLOPT C counterparts
 - Parallelization via rayon should be added at function evaluation points
 - The venv/ folder has Python 3.12 for any comparison scripts needed
+
+
+## Iteration 1 — Analysis of DIRect.c Main Loop and Memory Layout (2026-02-21)
+
+### What was implemented
+- Thoroughly analyzed `nlopt/src/algs/direct/DIRect.c` line by line, documenting:
+  - Complete `direct_direct_()` function: signature, all parameters, return codes
+  - Full variable map: every dynamically allocated array (`c__`, `f`, `length`, `point`,
+    `anchor`, `s`, `thirds`, `levels`, `w`, `oldl`, `oldu`, `list2`, `arrayi`) with sizes,
+    indexing conventions (1-based Fortran heritage), and purpose
+  - All scalar variables: `jones`, `ifree`, `minpos`, `fmax`, `numfunc`, `actdeep`,
+    `actmaxdeep`, `maxi`, `maxpos`, `ifeasiblef`, `iinfesiblef`, `iepschange`, etc.
+  - Memory allocation scheme: `MAXFUNC = maxf + 1000 + maxf/2`, `MAXDEEP = MAXFUNC/5`,
+    `MAXDIV = 5000` constant
+  - SGJ's transposition of arrays from Fortran column-major to C row-major layout
+  - Initialization sequence: `dirheader_()` → `dirinitlist_()` → `dirpreprc_()` → `dirinit_()`
+  - Main iteration loop: `dirchoose_()` → `dirdoubleinsert_()` (Original only) →
+    for-each-selected-rect: remove → `dirget_i_()` → `dirsamplepoints_()` →
+    `dirsamplef_()` → `dirdivide_()` → `dirinsertlist_()`
+  - Termination checks in exact order: volume_tol → sigma_tol → fglobal → replace_inf →
+    epsilon update → budget increase → maxfeval
+  - Epsilon update logic: fixed when eps>0 (`iepschange=0`), Jones formula when eps<0
+    (`iepschange=1`, `eps = max(|minf|*1e-4, epsfix)`)
+  - Key quirks: bounds modified in-place by `dirpreprc_()`, volume check uses jones=0,
+    budget elasticity for infeasible problems, MAXDIV=5000 limitation
+- Created detailed pseudocode control flow diagram
+
+### Files created
+- direct-nlopt-rs/analysis/gablonsky_analysis.md
+
+### Files modified
+- plans/prd-direct-nlopt.json (marked first analysis item as passes: true)
+
+### Git commits
+- `ad0897f` docs(analysis): analyze DIRect.c main loop, memory layout, and control flow
+
+### Test results
+- N/A (analysis-only task, no code changes)
+
+### Notes
+- The 1-based indexing permeates the entire codebase and must be carefully handled in Rust
+- `l` and `u` arrays are destructively overwritten by `dirpreprc_()` — Rust impl should
+  store scaling coefficients separately to avoid this confusing pattern
+- Volume tolerance check always uses jones=0 regardless of algorithm — potential intentional
+  design or bug; Rust impl should match this exactly for faithfulness
+- The `s` array (selected rectangles) has a hardcoded limit of MAXDIV=5000 — only relevant
+  for DIRECT_ORIGINAL with `dirdoubleinsert_()`
