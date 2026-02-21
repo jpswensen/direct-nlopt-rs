@@ -3,7 +3,7 @@
 //! Tests all algorithm variants across multiple:
 //! - Dimensionalities (2D, 5D, 10D, 20D)
 //! - Objective functions (Sphere, Rosenbrock, Rastrigin, Ackley, Styblinski-Tang)
-//! - Parallel modes (serial vs parallel, for Gablonsky variants)
+//! - Parallel modes (serial vs parallel, for both Gablonsky and CDirect backends)
 //!
 //! Run with:
 //!   cargo run --example performance_report --release
@@ -297,6 +297,57 @@ fn main() {
     eprintln!();
     writeln!(md).unwrap();
 
+    // ── Section 3b: Serial vs Parallel (CDirect Backend) ────────────────
+
+    writeln!(md, "## 3b. Serial vs Parallel (CDirect Backend)").unwrap();
+    writeln!(md).unwrap();
+    writeln!(md, "Comparison using **expensive** Rosenbrock (10,000 sin/cos iterations per eval).").unwrap();
+    writeln!(md, "CPU threads: {num_cpus}").unwrap();
+    writeln!(md).unwrap();
+
+    let cdirect_par_algos: Vec<(DirectAlgorithm, &str)> = vec![
+        (DirectAlgorithm::Original, "Original"),
+        (DirectAlgorithm::LocallyBiased, "LocallyBiased"),
+        (DirectAlgorithm::Randomized, "Randomized"),
+    ];
+
+    writeln!(md, "| Algorithm | Dims | MaxFEval | Serial | Parallel | Speedup | f(serial) | f(parallel) |").unwrap();
+    writeln!(md, "|---|---:|---:|---:|---:|---:|---:|---:|").unwrap();
+
+    for (algo, algo_name) in &cdirect_par_algos {
+        for (&dims, &maxf) in par_dims.iter().zip(par_fevals.iter()) {
+            eprint!("\r  CDirect Parallel: {algo_name} / {dims}D ...        ");
+            let bounds: Vec<(f64, f64)> = vec![(-5.0, 10.0); dims];
+
+            let serial = run_single(expensive_rosenbrock, "ExpRosenbrock", &bounds,
+                *algo, algo_name, maxf, false, 1);
+            let parallel = run_single(expensive_rosenbrock, "ExpRosenbrock", &bounds,
+                *algo, algo_name, maxf, true, 1);
+
+            let speedup = if parallel.time_us > 0 {
+                serial.time_us as f64 / parallel.time_us as f64
+            } else {
+                0.0
+            };
+
+            writeln!(
+                md,
+                "| {} | {} | {} | {} | {} | {:.2}x | {:.4e} | {:.4e} |",
+                algo_name,
+                dims,
+                maxf,
+                format_time(serial.time_us),
+                format_time(parallel.time_us),
+                speedup,
+                serial.fun,
+                parallel.fun
+            )
+            .unwrap();
+        }
+    }
+    eprintln!();
+    writeln!(md).unwrap();
+
     // ── Section 4: Cheap-Objective Overhead ─────────────────────────────
 
     writeln!(md, "## 4. Cheap-Objective Performance (Serial)").unwrap();
@@ -341,7 +392,9 @@ fn main() {
     writeln!(md, "### Key Findings").unwrap();
     writeln!(md).unwrap();
     writeln!(md, "- **Serial mode** produces bit-identical results to NLOPT C code").unwrap();
-    writeln!(md, "- **Parallel speedup** scales with dimensionality (2×d points per rectangle) and objective cost").unwrap();
+    writeln!(md, "- **Parallel speedup** scales with dimensionality and objective cost for both backends").unwrap();
+    writeln!(md, "- **CDirect parallel** uses collect→parallel-eval→apply across all potentially-optimal rectangles").unwrap();
+    writeln!(md, "- **Gablonsky parallel** uses per-rectangle and batch-across-rectangle parallel evaluation").unwrap();
     writeln!(md, "- **CDirect backend** (BTreeMap) and **Gablonsky backend** (SoA + linked lists) show comparable performance").unwrap();
     writeln!(md, "- **Locally-biased variants** converge faster on unimodal/low-multimodal problems").unwrap();
     writeln!(md, "- **Original variants** provide better global exploration on highly multimodal problems").unwrap();

@@ -19,6 +19,8 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use rayon::prelude::*;
+
 use crate::error::{DirectError, DirectReturnCode, Result};
 use crate::types::{Bounds, DirectOptions, DirectResult};
 
@@ -430,13 +432,23 @@ impl CDirect {
         loop {
             let minf0 = p.minf;
 
-            let ret = self.divide_good_rects(
-                func,
-                &mut p,
-                max_feval,
-                max_time,
-                start_time.as_ref(),
-            );
+            let ret = if self.options.parallel {
+                self.divide_good_rects_parallel(
+                    func,
+                    &mut p,
+                    max_feval,
+                    max_time,
+                    start_time.as_ref(),
+                )
+            } else {
+                self.divide_good_rects(
+                    func,
+                    &mut p,
+                    max_feval,
+                    max_time,
+                    start_time.as_ref(),
+                )
+            };
 
             nit += 1;
 
@@ -1067,6 +1079,381 @@ impl CDirect {
             }
 
             return Ok(xtol_reached);
+        }
+    }
+
+    /// Parallel version of `divide_good_rects()`.
+    ///
+    /// Uses a collect→parallel-eval→apply pattern:
+    /// 1. Compute convex hull (read-only on tree)
+    /// 2. Identify qualifying rectangles via epsilon test
+    /// 3. For each qualifying rect, compute candidate evaluation points
+    /// 4. Batch-evaluate all points in parallel via rayon
+    /// 5. Apply results sequentially: dimension sorts, child creation, tree insertion
+    ///
+    /// The serial `divide_good_rects()` interleaves evaluation with tree mutation
+    /// and checks stopping conditions after each eval. The parallel version instead
+    /// evaluates all candidates for the current iteration in one batch, then applies
+    /// results. This means:
+    /// - `max_feval` may be slightly overshot (same behavior as Gablonsky parallel)
+    /// - Stopping checks happen after the batch, not mid-eval
+    /// - The dimension sort order within each rectangle is identical to serial
+    ///   (it depends only on f-values within that rectangle)
+    /// - `age` and `next_id` assignment order may differ from serial (affects only
+    ///   tiebreaking in the BTreeMap, not correctness)
+    fn divide_good_rects_parallel(
+        &self,
+        func: &ArcObjFn,
+        p: &mut CDirectParams,
+        max_feval: usize,
+        max_time: f64,
+        start_time: Option<&std::time::Instant>,
+    ) -> std::result::Result<bool, DirectReturnCode> {
+        let magic_eps_orig = p.magic_eps;
+        let mut magic_eps = magic_eps_orig;
+        let n = p.n;
+        let which_diam = p.which_diam;
+        let which_div = p.which_div;
+
+        loop {
+            let allow_dups = p.which_opt != 1;
+            let hull = Self::convex_hull(&p.rtree, allow_dups);
+            let nhull = hull.len();
+            if nhull == 0 {
+                return Err(DirectReturnCode::InvalidArgs);
+            }
+
+            // ── Phase 1: Identify qualifying rectangles ──
+            // Walk the hull exactly as the serial path does, collecting keys of
+            // rectangles that pass the potentially-optimal test.
+            let mut qualifying_keys: Vec<RectKey> = Vec::new();
+
+            let mut i = 0;
+            while i < nhull {
+                let mut im: i64 = i as i64 - 1;
+                while im >= 0 && hull[im as usize].diameter == hull[i].diameter {
+                    im -= 1;
+                }
+                let mut ip = i + 1;
+                while ip < nhull && hull[ip].diameter == hull[i].diameter {
+                    ip += 1;
+                }
+
+                let mut k1 = f64::NEG_INFINITY;
+                let mut k2 = f64::NEG_INFINITY;
+
+                if im >= 0 {
+                    k1 = (hull[i].f_value - hull[im as usize].f_value)
+                        / (hull[i].diameter - hull[im as usize].diameter);
+                }
+                if ip < nhull {
+                    k2 = (hull[i].f_value - hull[ip].f_value)
+                        / (hull[i].diameter - hull[ip].diameter);
+                }
+                let k = k1.max(k2);
+
+                if hull[i].f_value - k * hull[i].diameter
+                    <= p.minf - magic_eps * p.minf.abs()
+                    || ip == nhull
+                {
+                    qualifying_keys.push(hull[i].clone());
+                }
+
+                if p.which_opt == 1 {
+                    i = ip;
+                } else if p.which_opt == 2 {
+                    let skip = p.age % (ip - i).max(1);
+                    i += skip + 1;
+                    if i > ip {
+                        i = ip;
+                    }
+                } else {
+                    i += 1;
+                }
+            }
+
+            if qualifying_keys.is_empty() {
+                if magic_eps != 0.0 {
+                    magic_eps = 0.0;
+                    continue;
+                } else {
+                    // Fallback: divide largest rectangle with smallest f
+                    if let Some((max_key, _)) = p.rtree.iter().next_back() {
+                        let wmax_d = max_key.diameter;
+                        let target_key = p
+                            .rtree
+                            .range(..)
+                            .rev()
+                            .take_while(|(k, _)| k.diameter == wmax_d)
+                            .last()
+                            .map(|(k, _)| k.clone());
+
+                        if let Some(key) = target_key {
+                            let ret = self.divide_rect_by_key(
+                                func, p, &key, max_feval, max_time, start_time,
+                            );
+                            if let Some(code) = ret {
+                                return Err(code);
+                            }
+                        }
+                    }
+                    return Ok(false);
+                }
+            }
+
+            // If the number of candidate evaluations is below the parallel
+            // threshold, fall back to serial subdivision for this iteration.
+            // Estimate: each rect produces at least 2 evals.
+            let est_evals: usize = qualifying_keys.len() * 2;
+            if est_evals < self.options.min_parallel_evals {
+                // Use serial path for this batch
+                for key in &qualifying_keys {
+                    let ret = self.divide_rect_by_key(
+                        func, p, key, max_feval, max_time, start_time,
+                    );
+                    if let Some(code) = ret {
+                        return Err(code);
+                    }
+                }
+                return Ok(false);
+            }
+
+            // ── Phase 2: Remove rects from tree, compute candidate points ──
+            //
+            // For each qualifying rectangle we compute the coordinates of all
+            // candidate points that need evaluation, WITHOUT calling the
+            // objective function. We also record which division path (A or B)
+            // each rectangle uses, and which dimensions are involved.
+
+            /// Describes the division plan for one rectangle.
+            struct RectDivisionPlan {
+                /// The removed HyperRect (mutated: widths narrowed, etc.)
+                rect: HyperRect,
+                /// Which path: true = Path A (all longest), false = Path B (one side)
+                is_path_a: bool,
+                /// For Path A: the sorted dimension indices (all longest dims)
+                /// For Path B: single-element vec with the chosen dimension
+                dims: Vec<usize>,
+                /// Global flat index where this rect's candidate f-values start
+                fval_offset: usize,
+            }
+
+            let mut plans: Vec<RectDivisionPlan> = Vec::with_capacity(qualifying_keys.len());
+            let mut all_points: Vec<Vec<f64>> = Vec::new();
+
+            for key in &qualifying_keys {
+                let rdiv = match p.rtree.remove(key) {
+                    Some(r) => r,
+                    None => continue, // Already removed (shouldn't happen)
+                };
+
+                let widths: Vec<f64> = rdiv.widths(n).to_vec();
+                let mut wmax = 0.0_f64;
+                let mut imax = 0;
+                for (i_dim, &w) in widths.iter().enumerate() {
+                    if w > wmax {
+                        wmax = w;
+                        imax = i_dim;
+                    }
+                }
+
+                let mut nlongest = 0i32;
+                for i_dim in 0..n {
+                    if wmax - widths[i_dim] <= wmax * EQUAL_SIDE_TOL {
+                        nlongest += 1;
+                    }
+                }
+
+                let is_path_a = which_div == 1 || (which_div == 0 && nlongest == n as i32);
+                let fval_offset = all_points.len();
+
+                if is_path_a {
+                    // Path A: evaluate 2 points per longest dimension
+                    let mut candidate_points = Vec::with_capacity(2 * nlongest as usize);
+                    let dims: Vec<usize> = (0..n)
+                        .filter(|&i_dim| wmax - widths[i_dim] <= wmax * EQUAL_SIDE_TOL)
+                        .collect();
+
+                    for &i_dim in &dims {
+                        let csave = rdiv.center(n)[i_dim];
+
+                        // Point at center - w*THIRD
+                        let mut pt_minus = rdiv.center(n).to_vec();
+                        pt_minus[i_dim] = csave - widths[i_dim] * THIRD;
+                        candidate_points.push(pt_minus);
+
+                        // Point at center + w*THIRD
+                        let mut pt_plus = rdiv.center(n).to_vec();
+                        pt_plus[i_dim] = csave + widths[i_dim] * THIRD;
+                        candidate_points.push(pt_plus);
+                    }
+
+                    all_points.extend(candidate_points);
+                    plans.push(RectDivisionPlan {
+                        rect: rdiv,
+                        is_path_a: true,
+                        dims,
+                        fval_offset,
+                    });
+                } else {
+                    // Path B: evaluate 2 points for one dimension
+                    let mut i_div = imax;
+                    if nlongest > 1 && which_div == 2 {
+                        let rand_idx = p.age % nlongest as usize;
+                        let mut count = 0;
+                        for k in 0..n {
+                            if wmax - widths[k] <= wmax * EQUAL_SIDE_TOL {
+                                if count == rand_idx {
+                                    i_div = k;
+                                    break;
+                                }
+                                count += 1;
+                            }
+                        }
+                    }
+
+                    // Narrow the rect's width for the chosen dimension (same as serial)
+                    let mut rdiv_narrowed = rdiv;
+                    rdiv_narrowed.widths_mut(n)[i_div] *= THIRD;
+                    rdiv_narrowed.set_diameter(
+                        Self::rect_diameter(n, rdiv_narrowed.widths(n), which_diam),
+                    );
+
+                    let mut pt_minus = rdiv_narrowed.center(n).to_vec();
+                    pt_minus[i_div] -= rdiv_narrowed.widths(n)[i_div];
+                    let mut pt_plus = rdiv_narrowed.center(n).to_vec();
+                    pt_plus[i_div] = rdiv_narrowed.center(n)[i_div] + rdiv_narrowed.widths(n)[i_div];
+
+                    all_points.push(pt_minus);
+                    all_points.push(pt_plus);
+
+                    plans.push(RectDivisionPlan {
+                        rect: rdiv_narrowed,
+                        is_path_a: false,
+                        dims: vec![i_div],
+                        fval_offset,
+                    });
+                }
+            }
+
+            // ── Phase 3: Parallel evaluation ──
+            let func_clone = Arc::clone(func);
+            let f_values: Vec<f64> = all_points
+                .par_iter()
+                .map(|pt| func_clone(pt))
+                .collect();
+
+            p.nfev += f_values.len();
+
+            // Update global minimum from all new evaluations
+            for (idx, pt) in all_points.iter().enumerate() {
+                if f_values[idx] < p.minf {
+                    p.minf = f_values[idx];
+                    p.xmin.copy_from_slice(pt);
+                }
+            }
+
+            // ── Phase 4: Apply results — create children, insert into tree ──
+            for plan in plans {
+                let fvals = &f_values[plan.fval_offset..];
+
+                if plan.is_path_a {
+                    // Path A: sort dimensions by min(f+, f-), trisect in sorted order
+                    let mut rdiv = plan.rect;
+                    let nlongest = plan.dims.len();
+
+                    // Build fv array matching serial: fv[2*dim_index] = f_minus,
+                    // fv[2*dim_index+1] = f_plus. But our candidate_points are
+                    // ordered by dimension: [dim0_minus, dim0_plus, dim1_minus, ...]
+                    // and fvals are in the same order.
+
+                    // Sort dims by min(f_minus, f_plus)
+                    let mut dim_fvals: Vec<(usize, f64, f64)> = Vec::with_capacity(nlongest);
+                    for (di, &dim_idx) in plan.dims.iter().enumerate() {
+                        let f_minus = fvals[2 * di];
+                        let f_plus = fvals[2 * di + 1];
+                        dim_fvals.push((dim_idx, f_minus, f_plus));
+                    }
+                    dim_fvals.sort_by(|a, b| {
+                        let fa = a.1.min(a.2);
+                        let fb = b.1.min(b.2);
+                        fa.partial_cmp(&fb).unwrap_or(std::cmp::Ordering::Equal)
+                    });
+
+                    // Trisect in sorted order (matching serial Path A)
+                    for &(si, f_minus, f_plus) in &dim_fvals {
+                        rdiv.widths_mut(n)[si] *= THIRD;
+                        rdiv.set_diameter(Self::rect_diameter(n, rdiv.widths(n), which_diam));
+                        rdiv.set_age(p.age as f64);
+                        p.age += 1;
+
+                        // Create two children
+                        for k in 0..=1usize {
+                            let mut rnew = rdiv.clone();
+                            rnew.center_mut(n)[si] +=
+                                rdiv.widths(n)[si] * (2.0 * k as f64 - 1.0);
+                            rnew.set_f_value(if k == 0 { f_minus } else { f_plus });
+                            rnew.set_age(p.age as f64);
+                            p.age += 1;
+                            let key = RectKey {
+                                diameter: rnew.diameter(),
+                                f_value: rnew.f_value(),
+                                age: rnew.age(),
+                                id: p.alloc_id(),
+                            };
+                            p.rtree.insert(key, rnew);
+                        }
+                    }
+
+                    // Re-insert modified parent
+                    let key = RectKey {
+                        diameter: rdiv.diameter(),
+                        f_value: rdiv.f_value(),
+                        age: rdiv.age(),
+                        id: p.alloc_id(),
+                    };
+                    p.rtree.insert(key, rdiv);
+                } else {
+                    // Path B: one dimension, 2 children
+                    let mut rdiv = plan.rect;
+                    let i_div = plan.dims[0];
+                    rdiv.set_age(p.age as f64);
+                    p.age += 1;
+
+                    for k in 0..=1usize {
+                        let mut rnew = rdiv.clone();
+                        rnew.center_mut(n)[i_div] +=
+                            rdiv.widths(n)[i_div] * (2.0 * k as f64 - 1.0);
+                        rnew.set_f_value(fvals[k]);
+                        rnew.set_age(p.age as f64);
+                        p.age += 1;
+                        let key = RectKey {
+                            diameter: rnew.diameter(),
+                            f_value: rnew.f_value(),
+                            age: rnew.age(),
+                            id: p.alloc_id(),
+                        };
+                        p.rtree.insert(key, rnew);
+                    }
+
+                    // Re-insert modified parent
+                    let key = RectKey {
+                        diameter: rdiv.diameter(),
+                        f_value: rdiv.f_value(),
+                        age: rdiv.age(),
+                        id: p.alloc_id(),
+                    };
+                    p.rtree.insert(key, rdiv);
+                }
+            }
+
+            // Check stopping conditions after the batch
+            let ret = self.check_stop_after_eval(p, max_feval, max_time, start_time);
+            if let Some(code) = ret {
+                return Err(code);
+            }
+
+            return Ok(false);
         }
     }
 

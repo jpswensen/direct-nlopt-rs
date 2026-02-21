@@ -141,10 +141,10 @@ let result = DirectBuilder::new(
 
 ### Which Variant to Choose?
 
-- **`LocallyBiased` (default)**: Good general-purpose choice. Uses the SGJ cdirect backend.
+- **`LocallyBiased` (default)**: Good general-purpose choice. Uses the SGJ cdirect backend. Supports parallelization.
 - **`GablonskyLocallyBiased`**: Equivalent algorithm via the Gablonsky backend. Supports parallelization, hidden constraints (infeasible regions), and produces identical results to NLOPT's `GN_ORIG_DIRECT_L`.
-- **`Original`**: Jones' original DIRECT. Less locally biased — better for highly multimodal functions but slower to converge near optima.
-- **`Randomized`**: Breaks ties randomly. Can help escape symmetry traps.
+- **`Original`**: Jones' original DIRECT. Less locally biased — better for highly multimodal functions but slower to converge near optima. Supports parallelization.
+- **`Randomized`**: Breaks ties randomly. Can help escape symmetry traps. Supports parallelization.
 
 ## NLOPT Correspondence
 
@@ -178,6 +178,7 @@ let result = DirectBuilder::new(
 | `divide_rect()` | `CDirect::divide_rect()` | `cdirect.rs` |
 | `convex_hull()` | `CDirect::convex_hull()` | `cdirect.rs` |
 | `divide_good_rects()` | `CDirect::divide_good_rects()` | `cdirect.rs` |
+| *(parallel extension)* | `CDirect::divide_good_rects_parallel()` | `cdirect.rs` |
 | `rect_diameter()` | `CDirect::rect_diameter()` | `cdirect.rs` |
 
 ### Data Structure Mapping — Gablonsky Backend
@@ -195,14 +196,17 @@ let result = DirectBuilder::new(
 
 ## Parallelization
 
-Function evaluations can be parallelized using [rayon](https://docs.rs/rayon). Parallelization is available for the Gablonsky backend (`GablonskyOriginal`, `GablonskyLocallyBiased`).
+Function evaluations can be parallelized using [rayon](https://docs.rs/rayon). Parallelization is available for **all algorithm variants**:
+
+- **Gablonsky backend** (`GablonskyOriginal`, `GablonskyLocallyBiased`): Per-rectangle and batch-across-rectangle parallel evaluation.
+- **CDirect backend** (`Original`, `LocallyBiased`, `Randomized`, and their `Unscaled` variants): Batch parallel evaluation across all potentially-optimal rectangles per iteration using a collect→parallel-eval→apply pattern.
 
 ### Options
 
 | Option | Default | Description |
 |---|---|---|
-| `parallel` | `false` | Enable per-rectangle parallel evaluation of 2×d sample points |
-| `parallel_batch` | `false` | Batch evaluations across all selected rectangles per iteration |
+| `parallel` | `false` | Enable parallel evaluation of sample points |
+| `parallel_batch` | `false` | Batch evaluations across all selected rectangles per iteration (Gablonsky only) |
 | `min_parallel_evals` | `4` | Minimum batch size to trigger parallel execution |
 
 ### When to Use Parallel Mode
@@ -216,7 +220,7 @@ Control rayon thread count via `RAYON_NUM_THREADS` environment variable.
 
 ### Correctness Guarantee
 
-With `parallel: false`, evaluation order is identical to NLOPT C, producing **bit-identical** results. With `parallel: true`, the same points are evaluated but in a different order; final results are equivalent.
+With `parallel: false`, evaluation order is identical to NLOPT C, producing **bit-identical** results for both backends. With `parallel: true`, the same candidate points are evaluated but in a different order; final results are equivalent. For the CDirect backend, the parallel path may slightly overshoot `max_feval` (same behavior as the Gablonsky parallel path), since stopping conditions are checked after each batch rather than after each individual evaluation.
 
 ## Performance
 

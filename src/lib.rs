@@ -69,18 +69,23 @@
 //!
 //! ## Parallelization
 //!
-//! Function evaluations can be parallelized using [rayon](https://docs.rs/rayon):
+//! Function evaluations can be parallelized using [rayon](https://docs.rs/rayon).
+//! Parallelization is available for **all algorithm variants**:
 //!
-//! - **`parallel: true`** — Evaluates the 2×d sample points per rectangle in parallel.
-//!   Best when the objective function is expensive relative to rayon overhead (~1–5 µs).
+//! - **Gablonsky backend** (`GablonskyOriginal`, `GablonskyLocallyBiased`):
+//!   Per-rectangle and batch-across-rectangle parallel evaluation.
+//! - **CDirect backend** (`Original`, `LocallyBiased`, `Randomized`, and their
+//!   `Unscaled` variants): Batch parallel evaluation across all potentially-optimal
+//!   rectangles per iteration using a collect→parallel-eval→apply pattern.
+//!
+//! Options:
+//!
+//! - **`parallel: true`** — Enable parallel evaluation of sample points.
 //! - **`parallel_batch: true`** — Additionally batches evaluations across all selected
-//!   rectangles in an iteration. Maximizes throughput for expensive objectives.
+//!   rectangles in an iteration (Gablonsky backend only).
 //! - **`min_parallel_evals`** — Threshold below which the serial path is used even when
 //!   `parallel` is `true`. Default: 4 (avoids overhead for 1D/2D problems).
 //! - **Serial mode (`parallel: false`)** — Produces results **bit-identical** to NLOPT C.
-//!
-//! Parallelization is only available for the Gablonsky backend
-//! (`GablonskyOriginal`, `GablonskyLocallyBiased`).
 //!
 //! ## Termination Criteria
 //!
