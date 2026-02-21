@@ -92,3 +92,70 @@
   design or bug; Rust impl should match this exactly for faithfulness
 - The `s` array (selected rectangles) has a hardcoded limit of MAXDIV=5000 — only relevant
   for DIRECT_ORIGINAL with `dirdoubleinsert_()`
+
+
+## Iteration 2 — Analysis of DIRsubrout.c Subroutines (2026-02-21)
+
+### What was implemented
+- Thoroughly analyzed `nlopt/src/algs/direct/DIRsubrout.c` (1595 lines) function-by-function:
+  - `direct_dirgetlevel_()`: Level computation for both algmethod variants. Jones Original
+    returns min(length[i]), Gablonsky returns k*n+p encoding both min index and count.
+  - `direct_dirchoose_()`: Potentially optimal rectangle selection via pairwise slope-based
+    convex hull sweep (not monotone chain). Collects anchor heads per depth, eliminates
+    candidates above hull or failing epsilon test. Special handling when no feasible point
+    exists (selects only one rect).
+  - `direct_dirdoubleinsert_()`: Jones Original only — walks linked lists at each selected
+    rect's depth level to find additional rects with f-value within 1e-13 tolerance.
+  - `direct_dirgetmaxdeep_()`: Returns min(length[i]) across all dimensions — the "depth"
+    of a rectangle (identical to dirgetlevel_ with jones=1).
+  - `direct_dirget_i__()`: Finds all dimensions with the minimum length index (longest
+    sides). Returns dimension indices and count in arrayi/maxi.
+  - `direct_dirsamplepoints_()`: Allocates 2*maxi new rectangle slots from free list,
+    copies parent center/lengths, then offsets center coordinates ± delta along each
+    divided dimension.
+  - `direct_dirdivide_()`: Sorts dimensions by min(f+,f-) using insertion sort
+    (dirinsertlist_2__), then trisects in sorted order. Critical detail: dims divided
+    first get length incremented in ALL subsequent children.
+  - `direct_dirinsertlist_()`: Inserts 2*maxi+1 rectangles (maxi child pairs + parent)
+    into depth-indexed anchor lists maintaining f-value sorted order. Handles 6 ordering
+    cases for each pair vs existing anchor.
+  - `direct_dirreplaceinf_()`: For each infeasible rect, computes bounding box from side
+    lengths, searches for nearby feasible points, replaces f-value with min nearby + 1e-6
+    perturbation, re-sorts affected lists. Uses isinbox_() helper.
+  - `direct_dirinfcn_()`: Unscale x from [0,1]^n to [l,u] via (x+xs2)*xs1, call user
+    function, rescale back. Thread-unsafe (modifies x in place).
+  - `direct_dirpreprc_()`: Compute scaling: xs1=u-l, xs2=l/(u-l). Validates u>l.
+  - `direct_dirheader_()`: Input validation, epsilon sign handling (negative → dynamic
+    Jones update), bounds checking, capacity check.
+  - `direct_dirinit_()`: Full initialization — precompute thirds[]/levels[], evaluate
+    center (0.5,...,0.5), sample 2n neighbors, divide first rectangle, insert into lists.
+    Total evals: 2n+1.
+  - `direct_dirinitlist_()`: Initialize anchors to 0, f-values to 0, point[] as free
+    list chain 1→2→...→MAXFUNC→0, free=1.
+  - `direct_dirsummary_()`: Final logging (no algorithmic logic).
+- Documented 5 private helper functions: dirinsert_(), dirinsertlist_2__(),
+  dirsearchmin_(), isinbox_(), dirresortlist_()
+- Created complete function call graph showing all caller/callee relationships
+
+### Files created
+- direct-nlopt-rs/analysis/dirsubrout_analysis.md
+
+### Files modified
+- plans/prd-direct-nlopt.json (marked second analysis item as passes: true)
+
+### Git commits
+- `ac296ab` docs(analysis): analyze DIRsubrout.c subroutines function-by-function
+
+### Test results
+- N/A (analysis-only task, no code changes)
+
+### Notes
+- The `dirgetlevel_()` `p` variable counts dimensions matching `help` (dim 1's value),
+  NOT the minimum `k`. This subtlety is critical for correct Gablonsky level computation.
+- `dirinfcn_()` modifies `x` in-place for unscaling/rescaling — the Rust port must use a
+  separate scratch buffer for thread safety.
+- `dirreplaceinf_()` line 620-621 computes `x[l] = c[l,i]*c1[l] + c[l,i]*c2[l]` which
+  appears to be dead code (result stored in x but never used after).
+- `dirdoubleinsert_()` uses 1e-13 tolerance for "equal value" — this is hardcoded.
+- The `levels[]` array has different structure depending on jones: 2D for jones=0
+  (Gablonsky), 1D for jones=1 (Jones Original).
