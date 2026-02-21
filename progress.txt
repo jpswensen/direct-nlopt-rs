@@ -2154,3 +2154,49 @@
 - The NLOPT C code is not thread-safe — concurrent calls from different test threads caused SIGABRT
 - Static Mutex ensures only one test calls into C FFI at a time within the trace test binary
 - The existing tests from iteration 10 already verified line-by-line trace equivalence
+
+
+## Iteration 12 — Create automated CI-friendly test runner for NLOPT-Rust equivalence (2026-02-21)
+
+### What was implemented
+- Created `tests/run_all_comparisons.sh` — a comprehensive, CI-friendly test runner that compiles
+  NLOPT C (via build.rs nlopt-compare feature), runs all Rust comparison tests organized into
+  28 named test suites, and generates a structured summary report
+- 28 test suites covering all comparison categories: unit-level (scaling, levels, thirds,
+  longest_dims, linked_list, dirchoose, divide, convex_hull), integration-level (sphere,
+  rosenbrock, rastrigin, ackley, styblinski_tang), cross-implementation (cdirect_comparison),
+  termination (maxfeval, fglobal, voltol_sigmatol, force_stop), edge cases (highdim,
+  hidden_constraints, 1d, bounds, flat_degenerate), regression (golden, trace, parallel), and FFI
+- Script supports CLI flags: `--release` for release mode, `--perf` for performance comparison,
+  `--report FILE` to write summary to a file
+- Exits with code 0 on success, code 1 on any failure — suitable for CI pipelines
+- Per-suite pass/fail reporting with test counts and failure details
+- Summary includes total suites, total tests, duration, and per-suite status
+
+### Files created
+- direct-nlopt-rs/tests/run_all_comparisons.sh
+
+### Files modified
+- plans/prd-direct-nlopt.json (marked CI test runner as passes: true)
+
+### Git commits
+- `ec692fa` test(ci): create automated CI-friendly test runner for NLOPT-Rust equivalence
+- The script groups tests by filter patterns matching test function names, not by test file
+- Some tests may appear in multiple suites if their names match multiple filters
+- The total of 470 tests counted by the script is less than the full 533+ tests because
+  each suite filters to specific patterns rather than running all tests
+- Performance comparison (--perf) runs test_benchmark_comparison and extracts the markdown table
+- For full CI, recommend running with --release for faster execution and realistic performance data
+
+### Test results
+- All 28 test suites pass with 470 tests total
+- Duration: ~23 minutes in debug mode
+- No regressions
+
+### Notes
+- The script groups tests by filter patterns matching test function names, not by test file
+- Some tests may appear in multiple suites if their names match multiple filters
+- The total of 470 tests counted by the script is less than the full 533+ tests because
+  each suite filters to specific patterns rather than running all tests
+- Performance comparison (--perf) runs test_benchmark_comparison and extracts the markdown table
+- For full CI, recommend running with --release for faster execution and realistic performance data
