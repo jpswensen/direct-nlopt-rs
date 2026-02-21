@@ -1905,3 +1905,46 @@
 - The `_start`, `_maxtime`, and `_logfile` parameters are accepted but currently unused (matching NLOPT's typical usage pattern where these are handled at the nlopt_opt level)
 - cbindgen generates the header automatically; it also exports some internal constants (FEASIBLE, INFEASIBLE, etc.) which are harmless
 - The crate already had `crate-type = ["rlib", "cdylib", "staticlib"]` and `libc` dependency configured
+
+
+## Iteration 6 — Handle and test edge cases: 1D optimization (2026-02-21)
+
+### What was implemented
+- Created comprehensive 1D edge case test suite (18 new tests) comparing NLOPT C vs Rust
+- Tests cover 1D sphere x^2 on [-5,5] with both DIRECT_GABLONSKY and DIRECT_ORIGINAL algorithms
+  at multiple maxfeval/maxiter configurations (maxiter=20, maxfeval=200, maxfeval=500)
+- Tests cover additional 1D functions: shifted quadratic (x-1.5)^2+3 (off-center minimum),
+  absolute value |x-0.7| (non-smooth), and sphere with asymmetric bounds [0,10]
+- All C vs Rust comparisons use bit-exact equality assertions (not approximate)
+- Verified parallel threshold fallback: with min_parallel_evals=4 (default), 1D problems
+  produce only 2 sample points per rectangle → falls back to serial path automatically
+- Tested parallel with threshold=1 (always parallel) — still produces identical results
+  because parallel evaluation collects results and applies them in the same order
+- Tested parallel fallback with DIRECT_ORIGINAL algorithm variant
+- Verified 1D initialization evaluates exactly the expected number of points (2*1+1=3 for init,
+  then more during the first iteration depending on maxfeval)
+- Added solution quality tests: 1D sphere finds f < 1e-4 with 1000 evals,
+  shifted quadratic finds f ≈ 3.0 at x ≈ 1.5
+
+### Files created
+- direct-nlopt-rs/tests/test_1d_edge_cases.rs
+
+### Files modified
+- plans/prd-direct-nlopt.json (marked 1D edge cases as passes: true)
+
+### Git commits
+- `3e0ac1e` test(edge-cases): add 1D optimization edge case tests with C vs Rust comparison
+
+### Test results
+
+### Notes
+- In 1D, DIRECT always has maxi=1 (only 1 dimension to divide), producing exactly 2 new
+  sample points per rectangle division
+- The default min_parallel_evals=4 threshold correctly causes 1D problems to use the serial
+  evaluation path, avoiding rayon overhead for the trivially small batch size
+- Both DIRECT_ORIGINAL and DIRECT_GABLONSKY produce identical results for 1D sphere and
+  shifted quadratic (expected since 1D has only one dimension to divide)
+- NLOPT C and Rust produce bit-identical results for all tested 1D configurations
+- All 614 tests pass (18 new 1D edge case tests + 596 existing)
+- No regressions
+- All 1D C vs Rust comparisons show bit-identical results for x, minf, and nfev
