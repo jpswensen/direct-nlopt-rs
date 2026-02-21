@@ -36,6 +36,7 @@
 //!   Journal of Global Optimization 21, 27–37 (2001).
 //! - NLOPT: <https://github.com/stevengj/nlopt>
 
+pub mod direct;
 pub mod error;
 pub mod storage;
 pub mod types;

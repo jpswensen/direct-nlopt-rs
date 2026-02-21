@@ -430,3 +430,52 @@
 - Feasibility check `f_flag <= 1.0` correctly includes both FEASIBLE (0.0) and REPLACED (1.0)
 - Level indexing: levels[] is indexed by get_level() return value, which for Gablonsky is
   the min length index (bounded by actual search depth), well within levels[] array bounds
+
+
+## Iteration 5 — Implement direct.rs: Preprocessing, Scaling, and Evaluation (2026-02-21)
+
+### What was implemented
+- Created `src/direct.rs` module implementing the `Direct` struct — the core optimizer state for the Gablonsky translation path
+- Implemented `Direct::new()` with preprocessing matching `direct_dirpreprc_()` (DIRsubrout.c lines 1403-1442):
+  - `xs1[i] = u[i] - l[i]` (scaling factor per dimension)
+  - `xs2[i] = l[i] / (u[i] - l[i])` (offset factor per dimension)
+  - Validates bounds (lower < upper) for all dimensions
+- Implemented `Direct::validate_inputs()` matching `direct_dirheader_()` (DIRsubrout.c lines 1444-1565):
+  - Epsilon sign handling: negative eps → Jones update formula (`iepschange=1, epsfix=|eps|`)
+  - Positive/zero eps → constant epsilon (`iepschange=0, epsfix=1e100`)
+  - Memory size check: `maxf + 20 > maxfunc` → error
+- Implemented `Direct::to_actual()` matching `direct_dirinfcn_()` unscaling (lines 1071-1074):
+  - Formula: `x_actual[i] = (x_norm[i] + xs2[i]) * xs1[i]`
+  - Algebraic equivalence verified: `(x + l/(u-l)) * (u-l) = x*(u-l) + l`
+- Implemented `Direct::to_normalized()` matching `direct_dirinfcn_()` rescaling (lines 1084-1087):
+  - Formula: `x_norm[i] = x_actual[i] / xs1[i] - xs2[i]`
+- Implemented `Direct::evaluate()` matching `direct_dirinfcn_()`:
+  - Converts normalized → actual, calls user function, checks feasibility (NaN/Inf → infeasible)
+- Implemented tolerance conversion helpers matching `direct_wrap.c` (lines 67-77):
+  - `volume_reltol_pct()`, `sigma_reltol_pct()`, `fglobal_reltol_pct()`
+  - Volume/sigma: multiply by 100, set to -1 if ≤ 0
+  - fglobal_reltol: set to 0.0 if fglobal is DIRECT_UNKNOWN_FGLOBAL
+- Implemented `Direct::update_epsilon()` matching DIRect.c lines 671-675:
+  - Jones formula: `eps = max(|minf| * 1e-4, epsfix)`
+- Added `Direct::jones()` helper returning algmethod flag (0=Original, 1=Gablonsky)
+- Added 20 unit tests covering all functionality
+
+### Files created
+- direct-nlopt-rs/src/direct.rs
+
+### Files modified
+- direct-nlopt-rs/src/lib.rs (added `pub mod direct;`)
+- plans/prd-direct-nlopt.json (marked preprocessing/scaling task as passes: true)
+
+### Git commits
+- `cf446cc` feat(direct): implement preprocessing, scaling, and objective evaluation
+
+### Test results
+- 81 tests passed, 0 failed (+20 new tests: preprocessing, scaling roundtrip, algebraic equivalence, evaluate feasible/infeasible, validate_inputs epsilon handling, tolerance conversion, epsilon update, jones flag, multidim scaling)
+- cargo clippy clean (0 warnings)
+
+### Notes
+- The `ObjectiveFn` type alias (`dyn Fn(&[f64]) -> f64 + Send + Sync`) is used via `Arc<ObjectiveFn>` to satisfy clippy's type_complexity lint
+- Roundtrip scaling test uses 1e-9 tolerance for extreme bound ranges (e.g., [-1e10, 1e10]) due to floating-point precision limits
+- The `to_actual`/`to_normalized` pair is the inverse of NLOPT's in-place unscale/rescale in `dirinfcn_()` — NLOPT modifies x[] in place, but our Rust version takes separate input/output slices for safety
+- Storage creation in `Direct::new()` delegates to `RectangleStorage::new()` with the same MAXFUNC/MAXDEEP formulas as NLOPT
