@@ -1046,3 +1046,46 @@
 - init_lists test compares behavioral equivalence (valid free chain structure) rather than bit-exact raw memory
 - C `direct_dirinsertlist_()` uses `f -= 3` (Fortran 1-based column offset), `--point`, `++anchor`, `length -= (1 + n)` pointer adjustments
 - CStorage helper provides `set_f(idx, val, flag)`, `get_point()`, `set_point()`, `get_anchor()`, `alloc_rect()`, `walk_list()` methods mapping between 1-based C conventions and raw 0-based arrays
+
+
+## Iteration 22 — Comparative Unit Tests for PotentiallyOptimal::select() (dirchoose_) (2026-02-21)
+
+### What was implemented
+- Created comprehensive comparative unit tests verifying Rust PotentiallyOptimal::select() against NLOPT C direct_dirchoose_() and PotentiallyOptimal::double_insert() against direct_dirdoubleinsert_()
+- 19 tests across 12 scenarios covering both Gablonsky (jones=1) and Jones Original (jones=0) variants:
+  - Scenario 1: All rects at different levels with monotonically decreasing f → all selected (both variants)
+  - Scenario 2: One rect above convex hull → correctly excluded (both variants)
+  - Scenario 3: Multiple rects at same level → only anchor (lowest f) considered (both variants)
+  - Scenario 4: Epsilon test eliminates hull-point rects — tested with eps_rel and eps_abs
+  - Scenario 5: Empty levels / gaps in depth distribution (both variants, including n=3)
+  - Scenario 6: All infeasible → picks first non-empty anchor
+  - Scenario 7: Mixed feasible/infeasible with infeasible anchor at depth -1
+  - Scenario 8: Complex hull with 6 rects (both variants)
+  - Scenario 9: Non-cube rectangles testing Jones Original level computation
+  - Scenario 10: Single rect trivially selected
+  - Scenario 11: Deeper rect with higher f → eliminated by slope ≤ 0
+  - Scenario 12: Boundary epsilon values (zero and large epsilon)
+  - dirdoubleinsert test: 3 tied rects (within 1e-13) + 1 untied at same depth
+- Implemented manual sorted insertion helpers for both C and Rust storages to set up known configurations without using the pair-insert division pattern
+- Verified NLOPT C uses `levels` array (not `thirds`) when calling dirchoose_ — confirmed by DIRect.c line 455
+- All C FFI calls use correct parameter adjustments matching NLOPT's Fortran→C indexing conventions
+
+### Files created
+- direct-nlopt-rs/tests/test_dirchoose_compare.rs
+
+### Files modified
+- plans/prd-direct-nlopt.json (marked dirchoose_ test task as passes: true)
+
+### Git commits
+- `c06aabe` test(storage): add comparative unit tests for PotentiallyOptimal::select() and double_insert() vs NLOPT C dirchoose_ and dirdoubleinsert_
+
+### Test results
+- 294 tests passed, 0 failed (+20 new tests: 19 dirchoose + 1 dirdoubleinsert)
+- All existing tests continue to pass without regression
+
+### Notes
+- NLOPT C's dirchoose_ parameter named `thirds` actually receives the `levels` array from DIRect.c (confirmed at line 455)
+- The convex hull elimination logic matches exactly between Rust and C for all tested scenarios
+- The epsilon test threshold formula min(minf - eps_rel*|minf|, minf - eps_abs) is faithfully replicated
+- Jones Original level computation with non-cube rects (k*n + p formula) verified working correctly
+- The infeasible anchor (depth -1 / anchor[0]) handling is correctly appended after hull elimination
