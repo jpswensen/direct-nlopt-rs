@@ -37,6 +37,11 @@
 //! - NLOPT: <https://github.com/stevengj/nlopt>
 
 pub mod error;
+pub mod types;
 
-// Re-export main types (will be populated as modules are implemented)
+// Re-export main types
 pub use error::{DirectError, DirectReturnCode, Result};
+pub use types::{
+    Bounds, CallbackFn, DirectAlgorithm, DirectOptions, DirectResult, ObjectiveFn,
+    DIRECT_UNKNOWN_FGLOBAL, DIRECT_UNKNOWN_FGLOBAL_RELTOL,
+};

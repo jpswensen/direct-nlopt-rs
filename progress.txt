@@ -268,3 +268,47 @@
   2. `cdirect_hybrid_unscaled()` line 266: `longest(n, rnew+2*n)` has wrong offset for widths array
 - These bugs may be masked by local optimization or rarely-triggered code paths
 - The hybrid is the only NLOPT DIRECT variant that uses bisection (all others use trisection exclusively)
+
+
+## Iteration 2 — Implement types.rs: Core Type Definitions (2026-02-21)
+
+### What was implemented
+- Created `src/types.rs` with all core type definitions matching NLOPT's API
+- Defined `DirectAlgorithm` enum with 8 variants covering all NLOPT DIRECT algorithms:
+  - SGJ cdirect.c variants: Original, LocallyBiased, Randomized + their Unscaled counterparts
+  - Gablonsky translation variants: GablonskyOriginal, GablonskyLocallyBiased
+- Mapped each variant to NLOPT's internal encoding:
+  - `which_alg()` → base-3 encoding for cdirect.c (0, 13, 16)
+  - `algmethod()` → 0 (DIRECT_ORIGINAL) or 1 (DIRECT_GABLONSKY) for Gablonsky translation
+- Defined `DirectOptions` struct matching NLOPT's `direct_optimize()` parameters:
+  - max_feval, max_iter, max_time, magic_eps, magic_eps_abs
+  - volume_reltol (default 0.0), sigma_reltol (default -1.0)
+  - fglobal (default DIRECT_UNKNOWN_FGLOBAL = -inf), fglobal_reltol (default 0.0)
+  - algorithm, parallel
+- Defined `DirectResult` struct: x, fun, nfev, nit, success, return_code, message
+- Defined type aliases: `Bounds = Vec<(f64, f64)>`, `ObjectiveFn`, `CallbackFn`
+- Defined constants: `DIRECT_UNKNOWN_FGLOBAL`, `DIRECT_UNKNOWN_FGLOBAL_RELTOL`
+- Implemented `Display` for `DirectReturnCode`, `DirectAlgorithm`, and `DirectResult`
+- Implemented `Default` for `DirectOptions` matching NLOPT defaults exactly
+- Added 13 unit tests covering type conversions, which_alg decomposition, defaults, Display
+- Updated lib.rs to declare the types module and re-export all public types
+
+### Files created
+- direct-nlopt-rs/src/types.rs
+
+### Files modified
+- direct-nlopt-rs/src/lib.rs (added types module and re-exports)
+- plans/prd-direct-nlopt.json (marked types.rs implementation as passes: true)
+
+### Git commits
+- `a9f0cf7` feat(types): implement core type definitions matching NLOPT API
+
+### Test results
+- 13 tests passed, 0 failed (+13 new tests)
+- cargo clippy clean (no warnings)
+
+### Notes
+- Default algorithm is LocallyBiased (DIRECT-L), the most commonly used variant
+- DIRECT_UNKNOWN_FGLOBAL maps to f64::NEG_INFINITY matching C's -HUGE_VAL
+- sigma_reltol defaults to -1.0 (disabled) matching nlopt_get_param(opt, "sigma_reltol", -1.0)
+- volume_reltol defaults to 0.0, but NLOPT internally converts <=0 to -1 in direct_wrap.c
