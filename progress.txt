@@ -1137,3 +1137,58 @@
   which together implement insertion sort by w-value — confirmed identical to Rust's sort_by approach
 - The length cascade pattern is faithfully replicated: dimensions divided first (lower w) get their
   length set in ALL children from that sort position onward
+
+
+## Iteration 24 — Comparative unit tests for cdirect convex_hull() and rect_diameter() (2026-02-21)
+
+### What was implemented
+- Created 23 comparative unit tests verifying Rust CDirect rect_diameter() and convex_hull() 
+  produce identical results to NLOPT C cdirect.c algorithms
+- Added standalone C shim functions to nlopt_util_shim.c:
+  - `nlopt_shim_rect_diameter()`: replicates cdirect.c lines 94–112 exactly, including
+    the critical f32 rounding performance hack
+  - `nlopt_shim_convex_hull()`: replicates cdirect.c lines 261–378 monotone chain algorithm
+    using sorted arrays instead of red-black tree (same algorithm, simpler data structure)
+- rect_diameter tests (8 tests):
+  - Jones (Euclidean) measure with various widths (1D through 10D)
+  - Gablonsky (max-side) measure with various widths
+  - f32 rounding verification (diameter should roundtrip through f32)
+  - Jones vs Gablonsky differ for non-cubic and cubic rectangles
+  - DIRECT subdivision sequence verification (diameter non-increasing)
+  - Edge cases: very small widths (1e-8), very large widths (1e6), 1D
+- convex_hull tests (15 tests):
+  - Monotonically decreasing f values (all points on hull)
+  - One point above hull (excluded correctly)
+  - Single point, two points, empty input
+  - Same diameter (vertical line) handling
+  - Duplicate diameters with vertical lines
+  - Collinear points (cross product >= 0 boundary check)
+  - Duplicate endpoints with allow_dups=true and false
+  - Complex scenario with points above and below hull
+  - Realistic DIRECT diameters from simulated [-5,5]^2 optimization
+  - Many points at same diameter (stress test)
+  - V-shaped hull (f decreases then increases)
+
+### Files created
+- direct-nlopt-rs/tests/test_cdirect_hull_compare.rs
+
+### Files modified
+- direct-nlopt-rs/nlopt-shim/nlopt_util_shim.c (added rect_diameter and convex_hull shim functions)
+- plans/prd-direct-nlopt.json (marked cdirect convex_hull/rect_diameter test-unit task as passes: true)
+
+### Git commits
+- `4b0656b` test(cdirect): add comparative unit tests for convex_hull() and rect_diameter() vs NLOPT C
+
+### Test results
+- All existing tests continue to pass
+- Clippy clean (only pre-existing warnings)
+
+### Notes
+- Integration tests using FFI to C shim functions require a `use direct_nlopt::...` import
+  to force Cargo to link the native C library from the rlib; without this, the linker
+  can't find the C symbols (they are bundled in the rlib but only included when the crate
+  is actually referenced)
+- The C shim convex_hull uses pre-sorted arrays instead of rb_tree to avoid compiling
+  the full NLOPT redblack.c infrastructure; this tests the same algorithm faithfully
+- Gablonsky diameter does NOT decrease when dividing one dimension of a square rectangle
+  (max side stays the same), so the subdivision test uses >= instead of >
