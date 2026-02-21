@@ -1267,3 +1267,38 @@
   because dirdoubleinsert_() adds all equal-valued rectangles at the same level
 - The 3D test with maxiter=20 used 10683 evaluations (vs 653 for Gablonsky)
 - Asymmetric bounds test confirms scaling faithfulness with the Original algorithm
+
+
+## Iteration 27 — End-to-End Rosenbrock Comparison Tests (2026-02-21)
+
+### What was implemented
+- Created comprehensive Rosenbrock function comparison tests between NLOPT C and Rust
+- Tests cover both DIRECT_GABLONSKY and DIRECT_ORIGINAL algorithms
+- All 17 tests verify bit-identical results: x, minf, nfev match exactly between C and Rust
+- Test configurations:
+  - GABLONSKY: maxiter=100, maxfeval=2000, maxiter=200, asymmetric bounds [-2,4]×[-3,6], eps=1e-6
+  - ORIGINAL: maxiter=100, maxfeval=2000, maxfeval=5000, asymmetric bounds, eps=1e-6
+  - Cross-variant: both algorithms on same problem (maxiter=50)
+- Discovered DIRECT_ORIGINAL MAXDIV=5000 overflow at maxiter=200 on Rosenbrock
+  (ierror=-6 in C, Err(-6) in Rust) — both implementations agree on this limitation
+- Replaced maxiter=200 ORIGINAL test with maxfeval=5000 test to avoid the overflow
+- Key result: Rosenbrock's narrow curved valley is handled identically by both implementations,
+  confirming faithful porting of dirdivide_, dirchoose_, and double_insert logic
+
+### Files created
+- direct-nlopt-rs/tests/test_rosenbrock_comparison.rs
+
+### Files modified
+- plans/prd-direct-nlopt.json (marked Rosenbrock test-integration task as passes: true)
+
+### Git commits
+- `9dbf022` test(integration): add end-to-end Rosenbrock comparison vs NLOPT C for both algorithm variants
+
+### Test results
+- All Rosenbrock tests show bit-identical results between NLOPT C and Rust
+
+### Notes
+- DIRECT_GABLONSKY converges much faster on Rosenbrock: minf=4.98e-30 at maxiter=200 vs 9.56e-9 for ORIGINAL at maxiter=100
+- DIRECT_ORIGINAL with very high iteration counts can overflow MAXDIV (5000) due to many equal-valued rectangles in flat regions
+- This is a known limitation documented in NLOPT's source code ("Increase maxdiv or use our modification (Jones = 1)")
+- Asymmetric bounds tests confirm scaling faithfulness for both algorithm variants
