@@ -39,11 +39,13 @@ harness = false
 
 [build-dependencies]
 cbindgen = "0.28"
+cc = { version = "1.0", optional = true }
 
 [features]
 default = []
 parallel = []
 ffi = []
+nlopt-compare = ["cc"]
 
 [profile.release]
 lto = "fat"

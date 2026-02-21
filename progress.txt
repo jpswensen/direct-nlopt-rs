@@ -820,3 +820,54 @@
 - The Gablonsky callback only fires when `oldpos < minpos` (new minimum found at higher storage index), which can miss updates when free-list recycling produces lower indices. CDirect always calls the callback per iteration.
 - Pre-existing clippy warnings (loop indexing style) remain; no new warnings introduced.
 - The builder pattern uses `Box<ObjectiveFn>` and `Box<CallbackFn>` type aliases to satisfy clippy's type_complexity lint.
+
+
+## Iteration 16 — Create C Compilation Test Harness for NLOPT Comparison (2026-02-21)
+
+### What was implemented
+- Created build.rs that optionally compiles the NLOPT C DIRECT source files (DIRect.c, DIRsubrout.c, DIRserial.c, direct_wrap.c) using the cc crate
+- Created minimal header shims (nlopt-shim/) to satisfy NLOPT C dependencies without compiling the full NLOPT library:
+  - nlopt_config.h: platform-specific defines (HAVE_GETTIMEOFDAY, THREADLOCAL, etc.)
+  - nlopt.h: minimal typedefs needed by nlopt-util.h
+  - nlopt_util_shim.c: provides nlopt_seconds(), nlopt_stop_time_(), nlopt_isinf/isnan/isfinite/istiny
+  - nlopt-util.h: copied from NLOPT source (used by direct-internal.h)
+- Created tests/nlopt_ffi.rs: Rust FFI wrapper with safe NloptDirectRunner struct and C objective function callbacks
+  - Defines DirectAlgorithmC and DirectReturnCodeC enums matching NLOPT's C enums
+  - Provides sphere_c, rosenbrock_c, rastrigin_c as extern "C" objective functions
+  - 4 standalone NLOPT C tests (sphere/rosenbrock × Original/Gablonsky)
+  - 2 comparison tests that run NLOPT C and Rust side-by-side and verify both find correct minima
+- Created tests/test_nlopt_c.c: standalone C test program for direct compilation and testing
+- Feature-gated everything behind 'nlopt-compare' feature flag:
+  - build.rs only compiles C code when feature is active
+  - tests/nlopt_ffi.rs uses #![cfg(feature = "nlopt-compare")] to skip without feature
+  - Added cc crate as optional build-dependency in Cargo.toml
+- Verified: NLOPT C produces correct results (sphere minf=0, rosenbrock minf≈1.8e-19)
+- Verified: Rust implementation matches NLOPT C results closely (bit-exact for sphere, near-identical for rosenbrock)
+
+### Files created
+- direct-nlopt-rs/build.rs
+- direct-nlopt-rs/nlopt-shim/nlopt_config.h
+- direct-nlopt-rs/nlopt-shim/nlopt.h
+- direct-nlopt-rs/nlopt-shim/nlopt_util_shim.c
+- direct-nlopt-rs/nlopt-shim/nlopt-util.h (copied from nlopt/src/util/)
+- direct-nlopt-rs/tests/nlopt_ffi.rs
+- direct-nlopt-rs/tests/test_nlopt_c.c
+
+### Files modified
+- direct-nlopt-rs/Cargo.toml (added cc as optional build-dep, nlopt-compare feature)
+- plans/prd-direct-nlopt.json (marked test-foundation as passes: true)
+
+### Git commits
+- `d1474f4` test(foundation): create C compilation test harness for NLOPT comparison testing
+
+### Test results
+- 6 new nlopt_ffi tests passed (with --features nlopt-compare)
+- 2 doc-tests passed
+- Total with feature: 196 passed, 0 failed (+6 new tests)
+
+### Notes
+- The standalone C test program (tests/test_nlopt_c.c) could not be compiled directly due to macOS permission restrictions, but the cc crate compilation in build.rs works fine
+- NLOPT C sphere 2D finds exact 0.0 minimum; Rust also finds exact 0.0 — bit-identical
+- NLOPT C rosenbrock 2D GABLONSKY: x=[0.9999999997132019, 0.9999999993945377], minf=1.84e-19
+- Rust rosenbrock 2D GABLONSKY: x=[0.9999999997132014, 0.9999999993945374], minf=1.84e-19 — nearly identical (last digits differ slightly)
+- This harness enables all subsequent comparison tests to verify Rust vs C equivalence
