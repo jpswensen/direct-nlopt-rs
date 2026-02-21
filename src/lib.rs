@@ -206,6 +206,14 @@ impl DirectBuilder {
         self
     }
 
+    /// Set the minimum number of evaluations required to trigger parallel execution.
+    /// Below this threshold, the serial path is used even when `parallel` is `true`.
+    /// Default: 4. Set to 1 to always parallelize.
+    pub fn min_parallel_evals(mut self, threshold: usize) -> Self {
+        self.opts.min_parallel_evals = threshold.max(1);
+        self
+    }
+
     /// Set a callback for progress monitoring and early stopping.
     ///
     /// The callback receives `(x_best, f_best, nfev, nit)` and returns

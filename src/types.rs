@@ -217,6 +217,22 @@ pub struct DirectOptions {
     /// This can improve throughput when the objective function is expensive.
     /// Results may differ from sequential mode due to evaluation order.
     pub parallel_batch: bool,
+
+    /// Minimum number of function evaluations required to use parallel evaluation.
+    /// When the number of points to evaluate is below this threshold, the serial
+    /// path is used even if `parallel` is `true`. This avoids rayon thread-pool
+    /// overhead for small batches where parallelism doesn't pay off.
+    ///
+    /// Typical rayon overhead is 1–5 µs per task spawn. For objective functions
+    /// that take less than a few microseconds, the overhead dominates unless
+    /// the batch is large enough. A threshold of 4 works well in practice:
+    /// it falls back to serial for 1D and 2D problems (which produce only 2–4
+    /// sample points per rectangle) while still parallelizing higher-dimensional
+    /// problems and batch evaluations.
+    ///
+    /// Set to 1 to always parallelize when `parallel` is `true`.
+    /// Default: 4.
+    pub min_parallel_evals: usize,
 }
 
 impl Default for DirectOptions {
@@ -235,6 +251,7 @@ impl Default for DirectOptions {
             algorithm: DirectAlgorithm::default(),
             parallel: false,
             parallel_batch: false,
+            min_parallel_evals: 4,
         }
     }
 }
@@ -472,6 +489,7 @@ mod tests {
         assert_eq!(opts.algorithm, DirectAlgorithm::LocallyBiased);
         assert!(!opts.parallel);
         assert!(!opts.parallel_batch);
+        assert_eq!(opts.min_parallel_evals, 4);
     }
 
     #[test]

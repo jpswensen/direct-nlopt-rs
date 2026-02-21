@@ -507,7 +507,7 @@ impl Direct {
         let n = self.dim;
         let total = 2 * maxi;
 
-        if self.options.parallel && total > 1 {
+        if self.options.parallel && total >= self.options.min_parallel_evals {
             // ── Parallel path ──
             // Collect all normalized coordinates from the linked list
             let mut indices: Vec<usize> = Vec::with_capacity(total);
@@ -742,32 +742,35 @@ impl Direct {
             rect_boundaries.push((start_idx, total));
         }
 
-        // Phase 3: Evaluate ALL points in one parallel batch
+        // Phase 3: Evaluate ALL points — use parallel only if batch meets threshold
         let func = Arc::clone(&self.func);
         let force_stop = Arc::clone(&self.force_stop);
         let xs1 = &self.xs1;
         let xs2 = &self.xs2;
         let fmax_before = self.fmax;
 
-        let results: Vec<(f64, i32)> = all_points
-            .par_iter()
-            .map(|x_norm| {
-                if force_stop.load(Ordering::Relaxed) {
-                    (fmax_before, -1)
-                } else {
-                    let mut x_actual = vec![0.0; n];
-                    for i in 0..n {
-                        x_actual[i] = (x_norm[i] + xs2[i]) * xs1[i];
-                    }
-                    let f = func(&x_actual);
-                    if f.is_finite() {
-                        (f, 0)
-                    } else {
-                        (f64::MAX, 1)
-                    }
+        let eval_one = |x_norm: &Vec<f64>| -> (f64, i32) {
+            if force_stop.load(Ordering::Relaxed) {
+                (fmax_before, -1)
+            } else {
+                let mut x_actual = vec![0.0; n];
+                for i in 0..n {
+                    x_actual[i] = (x_norm[i] + xs2[i]) * xs1[i];
                 }
-            })
-            .collect();
+                let f = func(&x_actual);
+                if f.is_finite() {
+                    (f, 0)
+                } else {
+                    (f64::MAX, 1)
+                }
+            }
+        };
+
+        let results: Vec<(f64, i32)> = if all_points.len() >= self.options.min_parallel_evals {
+            all_points.par_iter().map(eval_one).collect()
+        } else {
+            all_points.iter().map(eval_one).collect()
+        };
 
         self.nfev += all_indices.len();
 
@@ -3352,5 +3355,119 @@ mod tests {
 
         assert!(result.success);
         assert!(result.fun < 5.0, "5D batch parallel f={}", result.fun);
+    }
+
+    // ──────────────────────────────────────────────────────────────────
+    // min_parallel_evals threshold tests
+    // ──────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_min_parallel_evals_threshold_serial_fallback() {
+        // With min_parallel_evals=8 on a 2D problem (4 sample points per rect),
+        // the per-rect parallel path should fall back to serial, producing
+        // bit-exact results matching the serial-only path.
+        let sphere = |x: &[f64]| -> f64 { x.iter().map(|xi| xi * xi).sum() };
+        let bounds = vec![(-5.0, 5.0); 2];
+
+        let serial_opts = DirectOptions {
+            max_feval: 200,
+            algorithm: DirectAlgorithm::GablonskyLocallyBiased,
+            parallel: false,
+            ..Default::default()
+        };
+        let mut d_serial = Direct::new(sphere, &bounds, serial_opts).unwrap();
+        let r_serial = d_serial.minimize(None).unwrap();
+
+        // Threshold=8, 2D produces 4 points/rect → always below threshold → serial path
+        let threshold_opts = DirectOptions {
+            max_feval: 200,
+            algorithm: DirectAlgorithm::GablonskyLocallyBiased,
+            parallel: true,
+            min_parallel_evals: 8,
+            ..Default::default()
+        };
+        let mut d_threshold = Direct::new(sphere, &bounds, threshold_opts).unwrap();
+        let r_threshold = d_threshold.minimize(None).unwrap();
+
+        assert_eq!(r_serial.nfev, r_threshold.nfev, "nfev must be identical");
+        assert_eq!(r_serial.fun, r_threshold.fun, "fun must be bit-exact");
+        assert_eq!(r_serial.x, r_threshold.x, "x must be bit-exact");
+    }
+
+    #[test]
+    fn test_min_parallel_evals_threshold_enables_parallel() {
+        // With min_parallel_evals=1 on a 5D problem, parallel should always be used.
+        // With min_parallel_evals=100, it should fall back to serial.
+        // Both should converge to a good solution.
+        let sphere = |x: &[f64]| -> f64 { x.iter().map(|xi| xi * xi).sum() };
+        let bounds = vec![(-5.0, 5.0); 5];
+
+        let low_threshold = DirectOptions {
+            max_feval: 500,
+            algorithm: DirectAlgorithm::GablonskyLocallyBiased,
+            parallel: true,
+            min_parallel_evals: 1,
+            ..Default::default()
+        };
+        let mut d_low = Direct::new(sphere, &bounds, low_threshold).unwrap();
+        let r_low = d_low.minimize(None).unwrap();
+
+        let high_threshold = DirectOptions {
+            max_feval: 500,
+            algorithm: DirectAlgorithm::GablonskyLocallyBiased,
+            parallel: true,
+            min_parallel_evals: 100,
+            ..Default::default()
+        };
+        let mut d_high = Direct::new(sphere, &bounds, high_threshold).unwrap();
+        let r_high = d_high.minimize(None).unwrap();
+
+        assert!(r_low.success);
+        assert!(r_high.success);
+        assert!(r_low.fun < 10.0, "low threshold f={}", r_low.fun);
+        assert!(r_high.fun < 10.0, "high threshold f={}", r_high.fun);
+    }
+
+    #[test]
+    fn test_min_parallel_evals_batch_mode() {
+        // Batch mode should also respect min_parallel_evals
+        let sphere = |x: &[f64]| -> f64 { x.iter().map(|xi| xi * xi).sum() };
+        let bounds = vec![(-5.0, 5.0); 2];
+
+        // High threshold in batch mode: should fall back to serial iterator
+        let opts = DirectOptions {
+            max_feval: 200,
+            algorithm: DirectAlgorithm::GablonskyLocallyBiased,
+            parallel: true,
+            parallel_batch: true,
+            min_parallel_evals: 1000,
+            ..Default::default()
+        };
+        let mut d = Direct::new(sphere, &bounds, opts).unwrap();
+        let result = d.minimize(None).unwrap();
+        assert!(result.success);
+        assert!(result.fun < 1.0, "batch with high threshold f={}", result.fun);
+    }
+
+    #[test]
+    fn test_min_parallel_evals_default_is_4() {
+        let opts = DirectOptions::default();
+        assert_eq!(opts.min_parallel_evals, 4);
+    }
+
+    #[test]
+    fn test_min_parallel_evals_builder() {
+        // Verify the builder method works by running an optimization
+        let sphere = |x: &[f64]| -> f64 { x.iter().map(|xi| xi * xi).sum() };
+        let bounds = vec![(-5.0, 5.0); 2];
+
+        let result = crate::DirectBuilder::new(sphere, bounds)
+            .parallel(true)
+            .min_parallel_evals(2)
+            .max_feval(200)
+            .minimize()
+            .unwrap();
+        assert!(result.success);
+        assert!(result.fun < 1.0);
     }
 }
