@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 authors = ["DIRECT-NLOPT Rust Team"]
 description = "A faithful Rust-native implementation of the NLOPT DIRECT/DIRECT-L global optimization algorithms with rayon parallelization"
-license = "MIT OR LGPL-2.1-or-later"
+license = "MIT"
 keywords = ["optimization", "global-optimization", "numerical", "mathematics", "direct"]
 categories = ["mathematics", "science", "algorithms"]
 

@@ -254,6 +254,16 @@ The crate exposes a C-compatible FFI matching NLOPT's `direct_optimize()` signat
 - Gablonsky, J.M. & Kelley, C.T. "A Locally-Biased form of the DIRECT Algorithm." *Journal of Global Optimization* 21, 27–37 (2001).
 - NLOPT: <https://github.com/stevengj/nlopt>
 
+## Attribution
+
+The bulk of this implementation was generated using **Claude Opus 4.6** (Anthropic) and the
+**ralph-wiggum method** — an automated multi-step agentic workflow that iteratively builds,
+tests, and refines code through a structured PRD (Product Requirements Document) plan. The
+NLOPT C source code (both the Gablonsky Fortran→C translation and the SGJ cdirect
+re-implementation) served as the sole source material for the faithful port.
+
 ## License
 
-MIT OR LGPL-2.1-or-later (matching NLOPT's license).
+This project is licensed under the **MIT License** — see the [LICENSE](LICENSE) file for
+details. This matches the license of the NLOPT DIRECT source code from which this
+implementation was derived.
