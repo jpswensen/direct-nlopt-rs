@@ -1,7 +1,11 @@
 //! Benchmarks for direct-nlopt-rs
 //!
-//! Includes parallel evaluation threshold benchmarks to determine the optimal
-//! `min_parallel_evals` setting.
+//! Comprehensive benchmark suite covering:
+//! - Standard test functions: sphere, rosenbrock, rastrigin
+//! - Dimensions: 2D, 5D, 10D
+//! - Algorithm variants: GablonskyOriginal, GablonskyLocallyBiased
+//! - Parallel modes: serial (apples-to-apples vs C), parallel
+//! - Parallel threshold tuning
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use direct_nlopt::{DirectBuilder, types::DirectAlgorithm};
@@ -11,16 +15,266 @@ fn sphere(x: &[f64]) -> f64 {
     x.iter().map(|xi| xi * xi).sum()
 }
 
+/// Rosenbrock function: f(x) = sum(100*(x_{i+1}-x_i^2)^2 + (1-x_i)^2)
+fn rosenbrock(x: &[f64]) -> f64 {
+    let mut sum = 0.0;
+    for i in 0..x.len() - 1 {
+        let t1 = x[i + 1] - x[i] * x[i];
+        let t2 = 1.0 - x[i];
+        sum += 100.0 * t1 * t1 + t2 * t2;
+    }
+    sum
+}
+
+/// Rastrigin function: f(x) = 10n + sum(x_i^2 - 10*cos(2*pi*x_i))
+fn rastrigin(x: &[f64]) -> f64 {
+    let n = x.len() as f64;
+    let mut sum = 10.0 * n;
+    for xi in x {
+        sum += xi * xi - 10.0 * (2.0 * std::f64::consts::PI * xi).cos();
+    }
+    sum
+}
+
 /// Expensive sphere: adds artificial computation per evaluation to simulate
-/// a costly objective function (~10µs per eval).
+/// a costly objective function.
 fn expensive_sphere(x: &[f64]) -> f64 {
     let base: f64 = x.iter().map(|xi| xi * xi).sum();
     let mut acc = base;
     for i in 0..1000 {
         acc += (acc + i as f64).sin() * 0.0001;
     }
-    acc - (acc - base) // cancel out the noise, keep the cost
+    acc - (acc - base)
 }
+
+// ── Standard test function benchmarks (matching nlopt_bench.c) ──
+
+fn bench_sphere(c: &mut Criterion) {
+    let mut group = c.benchmark_group("sphere");
+    group.sample_size(10);
+
+    for &dim in &[2, 5, 10] {
+        let bounds = vec![(-5.0, 5.0); dim];
+
+        // Gablonsky (DIRECT-L) — serial
+        group.bench_with_input(
+            BenchmarkId::new("gablonsky_serial", dim),
+            &dim,
+            |b, _| {
+                b.iter(|| {
+                    DirectBuilder::new(sphere, bounds.clone())
+                        .algorithm(DirectAlgorithm::GablonskyLocallyBiased)
+                        .max_feval(5000)
+                        .parallel(false)
+                        .minimize()
+                        .unwrap()
+                })
+            },
+        );
+
+        // Gablonsky (DIRECT-L) — parallel
+        group.bench_with_input(
+            BenchmarkId::new("gablonsky_parallel", dim),
+            &dim,
+            |b, _| {
+                b.iter(|| {
+                    DirectBuilder::new(sphere, bounds.clone())
+                        .algorithm(DirectAlgorithm::GablonskyLocallyBiased)
+                        .max_feval(5000)
+                        .parallel(true)
+                        .minimize()
+                        .unwrap()
+                })
+            },
+        );
+
+        // Original (Jones) — serial
+        group.bench_with_input(
+            BenchmarkId::new("original_serial", dim),
+            &dim,
+            |b, _| {
+                b.iter(|| {
+                    DirectBuilder::new(sphere, bounds.clone())
+                        .algorithm(DirectAlgorithm::GablonskyOriginal)
+                        .max_feval(5000)
+                        .parallel(false)
+                        .minimize()
+                        .unwrap()
+                })
+            },
+        );
+
+        // Original (Jones) — parallel
+        group.bench_with_input(
+            BenchmarkId::new("original_parallel", dim),
+            &dim,
+            |b, _| {
+                b.iter(|| {
+                    DirectBuilder::new(sphere, bounds.clone())
+                        .algorithm(DirectAlgorithm::GablonskyOriginal)
+                        .max_feval(5000)
+                        .parallel(true)
+                        .minimize()
+                        .unwrap()
+                })
+            },
+        );
+    }
+
+    group.finish();
+}
+
+fn bench_rosenbrock(c: &mut Criterion) {
+    let mut group = c.benchmark_group("rosenbrock");
+    group.sample_size(10);
+
+    for &dim in &[2, 5] {
+        let bounds = vec![(-5.0, 5.0); dim];
+
+        // Gablonsky — serial
+        group.bench_with_input(
+            BenchmarkId::new("gablonsky_serial", dim),
+            &dim,
+            |b, _| {
+                b.iter(|| {
+                    DirectBuilder::new(rosenbrock, bounds.clone())
+                        .algorithm(DirectAlgorithm::GablonskyLocallyBiased)
+                        .max_feval(5000)
+                        .parallel(false)
+                        .minimize()
+                        .unwrap()
+                })
+            },
+        );
+
+        // Gablonsky — parallel
+        group.bench_with_input(
+            BenchmarkId::new("gablonsky_parallel", dim),
+            &dim,
+            |b, _| {
+                b.iter(|| {
+                    DirectBuilder::new(rosenbrock, bounds.clone())
+                        .algorithm(DirectAlgorithm::GablonskyLocallyBiased)
+                        .max_feval(5000)
+                        .parallel(true)
+                        .minimize()
+                        .unwrap()
+                })
+            },
+        );
+
+        // Original — serial
+        group.bench_with_input(
+            BenchmarkId::new("original_serial", dim),
+            &dim,
+            |b, _| {
+                b.iter(|| {
+                    DirectBuilder::new(rosenbrock, bounds.clone())
+                        .algorithm(DirectAlgorithm::GablonskyOriginal)
+                        .max_feval(5000)
+                        .parallel(false)
+                        .minimize()
+                        .unwrap()
+                })
+            },
+        );
+
+        // Original — parallel
+        group.bench_with_input(
+            BenchmarkId::new("original_parallel", dim),
+            &dim,
+            |b, _| {
+                b.iter(|| {
+                    DirectBuilder::new(rosenbrock, bounds.clone())
+                        .algorithm(DirectAlgorithm::GablonskyOriginal)
+                        .max_feval(5000)
+                        .parallel(true)
+                        .minimize()
+                        .unwrap()
+                })
+            },
+        );
+    }
+
+    group.finish();
+}
+
+fn bench_rastrigin(c: &mut Criterion) {
+    let mut group = c.benchmark_group("rastrigin");
+    group.sample_size(10);
+
+    for &dim in &[2, 5] {
+        let bounds = vec![(-5.12, 5.12); dim];
+
+        // Gablonsky — serial
+        group.bench_with_input(
+            BenchmarkId::new("gablonsky_serial", dim),
+            &dim,
+            |b, _| {
+                b.iter(|| {
+                    DirectBuilder::new(rastrigin, bounds.clone())
+                        .algorithm(DirectAlgorithm::GablonskyLocallyBiased)
+                        .max_feval(5000)
+                        .parallel(false)
+                        .minimize()
+                        .unwrap()
+                })
+            },
+        );
+
+        // Gablonsky — parallel
+        group.bench_with_input(
+            BenchmarkId::new("gablonsky_parallel", dim),
+            &dim,
+            |b, _| {
+                b.iter(|| {
+                    DirectBuilder::new(rastrigin, bounds.clone())
+                        .algorithm(DirectAlgorithm::GablonskyLocallyBiased)
+                        .max_feval(5000)
+                        .parallel(true)
+                        .minimize()
+                        .unwrap()
+                })
+            },
+        );
+
+        // Original — serial
+        group.bench_with_input(
+            BenchmarkId::new("original_serial", dim),
+            &dim,
+            |b, _| {
+                b.iter(|| {
+                    DirectBuilder::new(rastrigin, bounds.clone())
+                        .algorithm(DirectAlgorithm::GablonskyOriginal)
+                        .max_feval(5000)
+                        .parallel(false)
+                        .minimize()
+                        .unwrap()
+                })
+            },
+        );
+
+        // Original — parallel
+        group.bench_with_input(
+            BenchmarkId::new("original_parallel", dim),
+            &dim,
+            |b, _| {
+                b.iter(|| {
+                    DirectBuilder::new(rastrigin, bounds.clone())
+                        .algorithm(DirectAlgorithm::GablonskyOriginal)
+                        .max_feval(5000)
+                        .parallel(true)
+                        .minimize()
+                        .unwrap()
+                })
+            },
+        );
+    }
+
+    group.finish();
+}
+
+// ── Parallel threshold tuning benchmarks ──
 
 fn bench_parallel_threshold_cheap(c: &mut Criterion) {
     let mut group = c.benchmark_group("parallel_threshold_cheap_5d");
@@ -28,7 +282,6 @@ fn bench_parallel_threshold_cheap(c: &mut Criterion) {
 
     let bounds = vec![(-5.0, 5.0); 5];
 
-    // Serial baseline
     group.bench_function("serial", |b| {
         b.iter(|| {
             DirectBuilder::new(sphere, bounds.clone())
@@ -40,7 +293,6 @@ fn bench_parallel_threshold_cheap(c: &mut Criterion) {
         })
     });
 
-    // Test different thresholds
     for threshold in [1, 2, 4, 8, 16, 32] {
         group.bench_with_input(
             BenchmarkId::new("threshold", threshold),
@@ -68,7 +320,6 @@ fn bench_parallel_threshold_expensive(c: &mut Criterion) {
 
     let bounds = vec![(-5.0, 5.0); 5];
 
-    // Serial baseline
     group.bench_function("serial", |b| {
         b.iter(|| {
             DirectBuilder::new(expensive_sphere, bounds.clone())
@@ -80,7 +331,6 @@ fn bench_parallel_threshold_expensive(c: &mut Criterion) {
         })
     });
 
-    // Test different thresholds
     for threshold in [1, 2, 4, 8, 16, 32] {
         group.bench_with_input(
             BenchmarkId::new("threshold", threshold),
@@ -104,6 +354,9 @@ fn bench_parallel_threshold_expensive(c: &mut Criterion) {
 
 criterion_group!(
     benches,
+    bench_sphere,
+    bench_rosenbrock,
+    bench_rastrigin,
     bench_parallel_threshold_cheap,
     bench_parallel_threshold_expensive
 );
