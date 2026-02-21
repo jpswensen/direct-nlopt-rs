@@ -1509,3 +1509,38 @@
 - The sphere center point (0,0) evaluates to exactly 0.0, so fglobal termination triggers immediately after initialization for fglobal=0.0
 - Shifted sphere (fglobal=5.0) requires more iterations to converge, confirming the divfactor scaling works correctly
 - Loose tolerance (fglobal_reltol=1e-2) terminates earlier than tight tolerance (1e-4) as expected
+
+
+## Iteration 34 — End-to-End volume_reltol and sigma_reltol Termination Comparison (2026-02-21)
+
+### What was implemented
+- Created end-to-end comparison tests for volume_reltol and sigma_reltol termination
+- Tests verify that NLOPT C and Rust stop at the SAME iteration with IDENTICAL results
+  (x, minf, nfev, return code) when volume_reltol or sigma_reltol drive termination
+- volume_reltol tests: 1e-8 and 1e-4 on 2D sphere (both Gablonsky and Original), 1e-8 on 3D sphere
+- sigma_reltol tests: 1e-3 and 1e-5 on 2D sphere (both Gablonsky and Original), 1e-3 on 3D sphere
+- Additional tests verify: voltol/sigmatol terminate before maxfeval, looser voltol terminates earlier
+- NLOPT C formula: volume_reltol*=100, sigma_reltol*=100 (convert to percentage), if <=0 then disabled
+  - Volume check: thirds[level]*100 <= volper (volper = volume_reltol*100)
+  - Sigma check: levels[level] <= sigmaper (sigmaper = sigma_reltol*100)
+- All comparisons show bit-identical results between C and Rust
+
+### Files created
+- direct-nlopt-rs/tests/test_voltol_sigmatol_termination.rs (11 new tests)
+
+### Files modified
+- plans/prd-direct-nlopt.json (marked volume_reltol/sigma_reltol termination as passes: true)
+
+### Git commits
+- See below
+
+### Test results
+- 17 tests passed (11 new + 6 nlopt_ffi), 0 failed
+- All volume_reltol and sigma_reltol comparisons show identical nfev, minf, x, and return codes
+
+### Notes
+- For sphere centered at origin, the function evaluates to exactly 0.0 at the center point
+- volume_reltol=1e-8 terminates at nfev=115 (Gablonsky 2D), nfev=461 (Original 2D), nfev=83 (Gablonsky 3D)
+- sigma_reltol=1e-3 terminates at nfev=19 (Gablonsky 2D), nfev=13 (Original 2D), nfev=29 (Gablonsky 3D)
+- sigma_reltol triggers earlier than volume_reltol for equivalent tolerance levels
+- Looser voltol (1e-4) triggers at nfev=39, tighter (1e-8) at nfev=115, confirming monotonic behavior
