@@ -1333,3 +1333,35 @@
 - Rastrigin function has ~10*n local minima per dimension, making it a challenging multimodal test
 - Both 2D and 3D configurations confirm faithful behavior across dimensions
 - The Rastrigin function was already defined in nlopt_ffi.rs (rastrigin_c) from the test foundation setup
+
+
+## Iteration 29 — End-to-end Ackley Function Comparison (2026-02-21)
+
+### What was implemented
+- Created end-to-end comparison test for the Ackley function on [-5,5]^2 with both algorithm variants
+- Ackley f(x) = -20*exp(-0.2*sqrt(sum(x_i^2)/n)) - exp(sum(cos(2*pi*x_i))/n) + 20 + e
+- Tests behavior on nearly-flat multiscale landscape — Ackley has a large nearly-flat outer region
+  with a steep hole at the origin, making it a good test for DIRECT's global exploration
+- Both DIRECT_GABLONSKY and DIRECT_ORIGINAL produce bit-identical results between NLOPT C and Rust
+- Tests include: maxfeval=1000, maxfeval=5000, both variants, eps=1e-4, eps=1e-6
+- All 13 tests pass with exact x, minf, and nfev matches
+
+### Files created
+- direct-nlopt-rs/tests/test_ackley_comparison.rs
+
+### Files modified
+- plans/prd-direct-nlopt.json (marked Ackley test-integration as passes: true)
+
+### Git commits
+- `7aadd07` test(integration): add end-to-end Ackley comparison vs NLOPT C for both algorithm variants
+
+### Test results
+- 13 tests passed, 0 failed (+13 new tests)
+- All comparisons show bit-identical results: x=[0,0], minf=4.440892098500626e-16, nfev matches exactly
+
+### Notes
+- The Ackley function has a global minimum of exactly 0 at the origin
+- Both implementations find minf = 4.440892098500626e-16 (essentially machine epsilon), confirming
+  they converge to the same point with the same floating-point arithmetic
+- The DIRECT_ORIGINAL variant uses more function evaluations (8081 vs 5025 for maxfeval=5000)
+  because it evaluates more rectangles per iteration (Jones vs Gablonsky selection)
