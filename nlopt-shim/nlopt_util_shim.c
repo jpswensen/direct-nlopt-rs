@@ -1,6 +1,7 @@
 /* Minimal utility functions needed by NLOPT DIRECT code.
-   Provides only nlopt_stop_time_() and nlopt_seconds() which are the
-   only nlopt-util functions used by the DIRECT algorithm files. */
+   Base stopping/utility functions are provided by stop.c.
+   This shim provides nlopt_seconds() (which stop.c calls but does not define)
+   and additional helper functions for comparison testing. */
 
 #include <math.h>
 #include <float.h>
@@ -30,17 +31,14 @@ double nlopt_seconds(void)
 #endif
 }
 
-int nlopt_stop_time_(double start, double maxtime)
+/* Stub for nlopt_iurand — used by cdirect.c for randomized variants only.
+   For which_alg=0 and which_alg=13 this is never reached; provide a
+   deterministic implementation for safety. */
+#include <stdlib.h>
+int nlopt_iurand(int n)
 {
-    return (maxtime > 0 && nlopt_seconds() - start >= maxtime);
+    return n > 0 ? (rand() % n) : 0;
 }
-
-/* nlopt_isinf, nlopt_isnan - not used by DIRECT but provided for completeness
-   if needed during linking */
-int nlopt_isinf(double x) { return isinf(x); }
-int nlopt_isnan(double x) { return isnan(x); }
-int nlopt_isfinite(double x) { return isfinite(x); }
-int nlopt_istiny(double x) { return fabs(x) < 1e-300; }
 
 /* ─── Thirds/levels precomputation helpers for comparison testing ───
    These extract the exact loops from direct_dirinit_() in DIRsubrout.c

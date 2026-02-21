@@ -29,6 +29,9 @@ typedef enum {
     NLOPT_MAXTIME_REACHED = 6
 } nlopt_result;
 
+/* cdirect.c uses NLOPT_MINF_MAX_REACHED which is an alias */
+#define NLOPT_MINF_MAX_REACHED NLOPT_STOPVAL_REACHED
+
 typedef struct nlopt_opt_s *nlopt_opt;
 
 typedef enum {

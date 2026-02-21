@@ -1394,3 +1394,59 @@
 - Both variants converge to x_i ≈ -2.903521 with the given evaluation budget
 - 5D DIRECT_ORIGINAL uses 5457 evaluations vs 5D GABLONSKY uses 5031 (consistent with
   Original evaluating more rectangles per iteration)
+
+
+## Iteration 31 — End-to-end cdirect vs Gablonsky Implementation Consistency (2026-02-21)
+
+### What was implemented
+- Extended the C compilation harness to compile NLOPT's cdirect.c (SGJ re-implementation) alongside
+  the Gablonsky translation, including required dependencies: redblack.c (red-black tree),
+  stop.c (stopping criteria), qsort_r.c (reentrant qsort)
+- Added FFI bindings for NLOPT's cdirect() function: NloptFuncC type, NloptResultC enum,
+  NloptStopping struct, and cdirect/cdirect_unscaled function declarations
+- Added NloptCDirectRunner safe wrapper in nlopt_ffi.rs for convenient C cdirect() invocation
+- Added sphere_nlopt and sphere_nlopt_counting helper functions (nlopt_func signature)
+- Created comprehensive comparison test (test_cdirect_vs_gablonsky.rs) with 8 tests:
+  1. test_cdirect_original_c_vs_rust: NLOPT C cdirect(which_alg=0) vs Rust CDirect::Original — IDENTICAL
+  2. test_cdirect_l_c_vs_rust: NLOPT C cdirect(which_alg=13) vs Rust CDirect::LocallyBiased — IDENTICAL
+  3. test_cross_implementation_sphere_original: NLOPT cdirect vs Gablonsky for DIRECT_ORIGINAL
+  4. test_cross_implementation_sphere_l: NLOPT cdirect vs Gablonsky for DIRECT-L
+  5. test_rust_cdirect_vs_rust_direct_l: Rust CDirect vs Rust Direct for DIRECT-L
+  6. test_rust_cdirect_vs_rust_direct_original: Rust CDirect vs Rust Direct for DIRECT_ORIGINAL
+  7. test_cdirect_l_c_vs_rust_3d: 3D DIRECT-L cdirect comparison
+  8. test_cdirect_original_c_vs_rust_3d: 3D DIRECT_ORIGINAL cdirect comparison
+- Updated nlopt.h shim: added NLOPT_MINF_MAX_REACHED macro
+- Updated nlopt_util_shim.c: removed duplicate symbols (now provided by stop.c), added nlopt_iurand stub
+- Updated build.rs to compile cdirect.c and utility dependencies
+
+### Key findings
+- NLOPT's cdirect and Gablonsky implementations produce DIFFERENT nfev counts for the same problem
+  and parameters (e.g., sphere [-5,5]^2 with maxfeval=500: cdirect nfev=500, Gablonsky nfev=543/613)
+- This is expected: different data structures (red-black tree vs SoA + linked lists) lead to different
+  rectangle processing orders and convex hull computations
+- Both implementations find the exact same minimum (x=0, minf=0 for sphere) — correctness is preserved
+- Rust CDirect exactly matches NLOPT C cdirect (bit-identical x, minf, nfev)
+- Rust Direct exactly matches NLOPT C direct_optimize (verified in prior iterations)
+
+### Files created
+- tests/test_cdirect_vs_gablonsky.rs
+
+### Files modified
+- build.rs (added cdirect.c, stop.c, redblack.c, qsort_r.c compilation)
+- nlopt-shim/nlopt.h (added NLOPT_MINF_MAX_REACHED)
+- nlopt-shim/nlopt_util_shim.c (removed duplicate symbols, added nlopt_iurand stub)
+- tests/nlopt_ffi.rs (added cdirect FFI bindings, NloptCDirectRunner, nlopt_func callbacks)
+- plans/prd-direct-nlopt.json (marked cdirect vs Gablonsky test as passes: true)
+
+### Git commits
+- `7e8a45a` test(integration): add cdirect vs Gablonsky cross-implementation consistency comparison
+
+### Test results
+- No regressions
+
+### Notes
+- The nfev difference between NLOPT's two implementations is documented and expected
+- cdirect uses maxeval-based stopping (via nlopt_stopping), while Gablonsky uses maxfeval
+  with a different check order, leading to slightly different termination points
+- The nlopt_iurand stub is only needed for randomized variants (which_alg=16); it's never
+  reached for which_alg=0 or which_alg=13

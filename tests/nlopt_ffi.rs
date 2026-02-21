@@ -42,6 +42,51 @@ pub type DirectObjectiveFuncC = extern "C" fn(
     data: *mut c_void,
 ) -> c_double;
 
+/// NLOPT's nlopt_func type (used by cdirect)
+pub type NloptFuncC = extern "C" fn(
+    n: c_uint,
+    x: *const c_double,
+    gradient: *mut c_double,
+    func_data: *mut c_void,
+) -> c_double;
+
+/// NLOPT's nlopt_result enum
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum NloptResultC {
+    NLOPT_FAILURE = -1,
+    NLOPT_INVALID_ARGS = -2,
+    NLOPT_OUT_OF_MEMORY = -3,
+    NLOPT_ROUNDOFF_LIMITED = -4,
+    NLOPT_FORCED_STOP = -5,
+    NLOPT_SUCCESS = 1,
+    NLOPT_STOPVAL_REACHED = 2,
+    NLOPT_FTOL_REACHED = 3,
+    NLOPT_XTOL_REACHED = 4,
+    NLOPT_MAXEVAL_REACHED = 5,
+    NLOPT_MAXTIME_REACHED = 6,
+}
+
+/// NLOPT's nlopt_stopping struct (used by cdirect)
+#[repr(C)]
+pub struct NloptStopping {
+    pub n: c_uint,
+    pub minf_max: c_double,
+    pub ftol_rel: c_double,
+    pub ftol_abs: c_double,
+    pub xtol_rel: c_double,
+    pub xtol_abs: *const c_double,
+    pub x_weights: *const c_double,
+    pub nevals_p: *mut c_int,
+    pub maxeval: c_int,
+    pub maxtime: c_double,
+    pub start: c_double,
+    pub force_stop: *mut c_int,
+    pub stop_msg: *mut *mut std::os::raw::c_char,
+}
+
+use std::os::raw::c_uint;
+
 extern "C" {
     pub fn direct_optimize(
         f: DirectObjectiveFuncC,
@@ -65,6 +110,37 @@ extern "C" {
         logfile: *mut c_void, // FILE*, pass null
         algorithm: DirectAlgorithmC,
     ) -> DirectReturnCodeC;
+
+    /// NLOPT's cdirect() — SGJ re-implementation using red-black trees.
+    /// Rescales bounds to [0,1]^n before calling cdirect_unscaled.
+    pub fn cdirect(
+        n: c_int,
+        f: NloptFuncC,
+        f_data: *mut c_void,
+        lb: *const c_double,
+        ub: *const c_double,
+        x: *mut c_double,
+        minf: *mut c_double,
+        stop: *mut NloptStopping,
+        magic_eps: c_double,
+        which_alg: c_int,
+    ) -> NloptResultC;
+
+    /// NLOPT's cdirect_unscaled() — unscaled variant.
+    pub fn cdirect_unscaled(
+        n: c_int,
+        f: NloptFuncC,
+        f_data: *mut c_void,
+        lb: *const c_double,
+        ub: *const c_double,
+        x: *mut c_double,
+        minf: *mut c_double,
+        stop: *mut NloptStopping,
+        magic_eps: c_double,
+        which_alg: c_int,
+    ) -> NloptResultC;
+
+    pub fn nlopt_seconds() -> c_double;
 }
 
 /// Safe wrapper around NLOPT's direct_optimize()
@@ -207,6 +283,134 @@ pub extern "C" fn rastrigin_c(
         sum += xi * xi - 10.0 * (2.0 * std::f64::consts::PI * xi).cos();
     }
     sum
+}
+
+// ============================================================
+// nlopt_func-compatible objective functions (for cdirect)
+// ============================================================
+
+/// Sphere function with nlopt_func signature: f(n, x, grad, data) -> double
+pub extern "C" fn sphere_nlopt(
+    n: c_uint,
+    x: *const c_double,
+    _gradient: *mut c_double,
+    _data: *mut c_void,
+) -> c_double {
+    let n = n as usize;
+    let mut sum = 0.0;
+    for i in 0..n {
+        let xi = unsafe { *x.add(i) };
+        sum += xi * xi;
+    }
+    sum
+}
+
+/// Sphere function with nlopt_func signature that counts evaluations.
+pub extern "C" fn sphere_nlopt_counting(
+    n: c_uint,
+    x: *const c_double,
+    _gradient: *mut c_double,
+    data: *mut c_void,
+) -> c_double {
+    let counter = unsafe { &*(data as *const std::sync::atomic::AtomicUsize) };
+    counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let n = n as usize;
+    let mut sum = 0.0;
+    for i in 0..n {
+        let xi = unsafe { *x.add(i) };
+        sum += xi * xi;
+    }
+    sum
+}
+
+// ============================================================
+// Safe wrapper for NLOPT cdirect()
+// ============================================================
+
+/// Result from running NLOPT cdirect
+#[derive(Debug, Clone)]
+pub struct NloptCDirectResult {
+    pub x: Vec<f64>,
+    pub minf: f64,
+    pub nfev: usize,
+    pub return_code: NloptResultC,
+}
+
+/// Safe wrapper around NLOPT's cdirect() function.
+pub struct NloptCDirectRunner {
+    pub dimension: usize,
+    pub lower_bounds: Vec<f64>,
+    pub upper_bounds: Vec<f64>,
+    pub max_feval: i32,
+    pub magic_eps: f64,
+    pub which_alg: i32,
+}
+
+impl NloptCDirectRunner {
+    pub fn new(dimension: usize, lower_bounds: Vec<f64>, upper_bounds: Vec<f64>) -> Self {
+        Self {
+            dimension,
+            lower_bounds,
+            upper_bounds,
+            max_feval: 10000,
+            magic_eps: 1e-4,
+            which_alg: 0,
+        }
+    }
+
+    /// Run NLOPT cdirect() with the given objective function.
+    pub unsafe fn run(&self, f: NloptFuncC, f_data: *mut c_void) -> NloptCDirectResult {
+        let mut x = vec![0.0f64; self.dimension];
+        let mut minf: f64 = f64::INFINITY;
+        let mut nevals: c_int = 0;
+        let mut force_stop: c_int = 0;
+        let mut stop_msg: *mut std::os::raw::c_char = std::ptr::null_mut();
+
+        let start = unsafe { nlopt_seconds() };
+
+        let mut stop = NloptStopping {
+            n: self.dimension as c_uint,
+            minf_max: f64::NEG_INFINITY, // no stopval
+            ftol_rel: 0.0,
+            ftol_abs: 0.0,
+            xtol_rel: 0.0,
+            xtol_abs: std::ptr::null(),
+            x_weights: std::ptr::null(),
+            nevals_p: &mut nevals,
+            maxeval: self.max_feval,
+            maxtime: 0.0, // no time limit
+            start,
+            force_stop: &mut force_stop,
+            stop_msg: &mut stop_msg,
+        };
+
+        let return_code = unsafe {
+            cdirect(
+                self.dimension as c_int,
+                f,
+                f_data,
+                self.lower_bounds.as_ptr(),
+                self.upper_bounds.as_ptr(),
+                x.as_mut_ptr(),
+                &mut minf,
+                &mut stop,
+                self.magic_eps,
+                self.which_alg,
+            )
+        };
+
+        // Free stop_msg if allocated
+        if !stop_msg.is_null() {
+            unsafe { libc::free(stop_msg as *mut c_void) };
+        }
+
+        NloptCDirectResult {
+            x,
+            minf,
+            nfev: nevals as usize,
+            return_code,
+        }
+    }
 }
 
 #[cfg(test)]
