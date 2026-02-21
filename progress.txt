@@ -771,3 +771,52 @@
 - Path A pre-evaluates function at all longest-side offsets before sorting; Path B evaluates after splitting
 - The fallback heuristic (divide largest rect with smallest f when nothing qualifies) matches cdirect.c lines 442–454
 - Remaining clippy warnings are about loop variable indexing style, acceptable for faithful C port
+
+
+## Iteration 15 — Implement Public API Matching NLOPT's direct_optimize() Wrapper (2026-02-21)
+
+### What was implemented
+- Implemented `direct_optimize()` high-level function matching NLOPT's `direct_optimize()` in `direct_wrap.c`
+  - Dispatches to Gablonsky translation (`Direct`) or SGJ re-implementation (`CDirect`) based on algorithm variant
+  - Tolerance conversion (ratios → percentages) already handled internally by `Direct::validate_inputs()` and `volume_reltol_pct()` / `sigma_reltol_pct()` / `fglobal_reltol_pct()`
+  - `DIRECT_UNKNOWN_FGLOBAL` handling: when fglobal is unknown, fglobal_reltol is ignored (matching NLOPT)
+- Implemented `DirectBuilder` with fluent API for configuring and running optimization
+  - `DirectBuilder::new(func, bounds)` creates builder with default options
+  - Setter methods: `.algorithm()`, `.max_feval()`, `.max_iter()`, `.max_time()`, `.magic_eps()`, `.magic_eps_abs()`, `.volume_reltol()`, `.sigma_reltol()`, `.fglobal()`, `.parallel()`, `.options()`
+  - `.with_callback()` for progress monitoring and early stopping
+  - `.minimize()` dispatches to appropriate backend
+- Implemented convenience functions: `minimize()`, `minimize_l()`, `minimize_randomized()`
+  - `minimize()` and `minimize_l()` use DIRECT-L (SGJ cdirect, `DirectAlgorithm::LocallyBiased`)
+  - `minimize_randomized()` uses DIRECT-L-RAND (`DirectAlgorithm::Randomized`)
+- Verified `Display` for `DirectResult` already implemented in types.rs (from Iteration 3)
+- Added 22 comprehensive API-level integration tests covering:
+  - `direct_optimize()` with all algorithm variants (Gablonsky Original, Gablonsky LocallyBiased, CDirect Original/L/Unscaled)
+  - Builder pattern with individual setters and bulk options
+  - Callback integration with both Gablonsky and CDirect backends
+  - Force-stop via callback
+  - fglobal termination
+  - Convenience functions (minimize, minimize_l, minimize_randomized)
+  - Error handling (invalid bounds, empty bounds)
+  - DIRECT_UNKNOWN_FGLOBAL default behavior
+  - Display formatting
+  - Dispatch consistency (Gablonsky vs CDirect produce comparable results)
+- Re-exported `DirectBuilder` from crate root
+- Added doc-examples for `direct_optimize()` and `DirectBuilder` (verified via doctests)
+
+### Files modified
+- direct-nlopt-rs/src/lib.rs (added DirectBuilder, direct_optimize, convenience functions, 22 tests, doc-examples)
+- plans/prd-direct-nlopt.json (marked public API task as passes: true)
+
+### Git commits
+- `743e10b` feat(api): implement public API with DirectBuilder, direct_optimize, and convenience functions
+
+### Test results
+- 188 lib tests passed, 0 failed (+22 new API tests)
+- 2 doc-tests passed, 0 failed (+2 new)
+- Total: 190 tests passed
+- No regressions from prior 166 tests
+
+### Notes
+- The Gablonsky callback only fires when `oldpos < minpos` (new minimum found at higher storage index), which can miss updates when free-list recycling produces lower indices. CDirect always calls the callback per iteration.
+- Pre-existing clippy warnings (loop indexing style) remain; no new warnings introduced.
+- The builder pattern uses `Box<ObjectiveFn>` and `Box<CallbackFn>` type aliases to satisfy clippy's type_complexity lint.
