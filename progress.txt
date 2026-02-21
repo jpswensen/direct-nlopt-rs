@@ -159,3 +159,59 @@
 - `dirdoubleinsert_()` uses 1e-13 tolerance for "equal value" — this is hardcoded.
 - The `levels[]` array has different structure depending on jones: 2D for jones=0
   (Gablonsky), 1D for jones=1 (Jones Original).
+
+
+## Iteration 3 — Analysis of DIRserial.c: Serial Function Evaluation (2026-02-21)
+
+### What was implemented
+- Thoroughly analyzed `nlopt/src/algs/direct/DIRserial.c` (150 lines) line by line:
+  - `direct_dirsamplef_()`: complete function signature with all 26 parameters documented
+  - Identified 7 unused parameters in serial version: `logfile`, `free`, `maxfunc`, `maxdeep`,
+    `oops`, `delta`, `sample` — these exist for API compatibility with DIRparallel.c
+  - Documented f2c 1-based parameter adjustments: `--u`, `--l`, `--x`, `--arrayi`, `--point`,
+    `f -= 3` (critical: makes f[(pos<<1)+1]=value, f[(pos<<1)+2]=flag)
+  - Documented c__ access pattern: `c__[i + pos * c_dim1]` where c_dim1 = n (row-major, dim-fast)
+- Documented the two-pass algorithm structure:
+  - **Pass 1** (lines 67–133): Iterate over all 2×maxi new sample points via linked list.
+    For each point: copy center to x buffer → call dirinfcn_() (unscale, evaluate, rescale) →
+    store result based on kret (0=feasible, ≥1=infeasible, -1=setup error) → update fmax/ifeasiblef/iinfesiblef
+  - **Pass 2** (lines 134–149): Re-iterate over same 2×maxi points, update minf/minpos
+    considering only feasible points (f[2*pos+2] == 0.0)
+- Documented the exact evaluation order from dirsamplepoints_():
+  - Chain: start → plus_d1 → minus_d1 → plus_d2 → minus_d2 → ... → plus_dM → minus_dM
+  - Positive offset first, then negative, for each of the maxi longest dimensions
+- Documented error handling:
+  - force_stop: skips evaluation (assigns fmax), overrides kret to -1
+  - kret=0: feasible → f_flag=0, update fmax
+  - kret≥1: infeasible → f_flag=2, f_value=fmax (uses current accumulated fmax)
+  - kret=-1: setup error → f_flag=-1
+- Identified independent vs sequential operations for parallelization:
+  - **Independent**: All 2×maxi function evaluations (each has own position, coordinates, result slot)
+  - **Sequential**: fmax accumulation (used for infeasible replacement), ifeasiblef, iinfesiblef tracking,
+    minf/minpos update (Pass 2)
+  - **Key subtlety**: Infeasible f-value assignment uses accumulated fmax, so serial vs parallel
+    may assign different placeholder values. This is acceptable since dirreplaceinf_() later
+    replaces these values anyway.
+- Compared with DIRparallel.c (381 lines): PVM-based parallel version with master/slave message
+  passing. Not used in NLOPT. Different f-array indexing (column-major vs transposed row-major).
+- Outlined Rust port strategy for both serial (exact match) and parallel (rayon par_iter) paths
+
+### Files created
+- direct-nlopt-rs/analysis/dirserial_analysis.md
+
+### Files modified
+- plans/prd-direct-nlopt.json (marked third analysis item as passes: true)
+
+### Git commits
+- `a74dc85` docs(analysis): analyze DIRserial.c serial function evaluation
+
+### Test results
+- N/A (analysis-only task, no code changes)
+
+### Notes
+- The scratch buffer `x[1..n]` is the only shared mutable state — Rust parallel version must
+  allocate per-thread copies (handled naturally by collecting centers into Vec before par_iter)
+- The `force_stop` check should use AtomicBool or similar in parallel mode for safe cross-thread access
+- For exact serial equivalence (parallel=false), the linked list traversal order must be preserved
+- The infeasible fmax assignment order dependence is the only semantic difference between
+  serial and parallel — and it doesn't affect final results due to dirreplaceinf_() post-processing
