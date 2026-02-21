@@ -1,0 +1,47 @@
+# Progress Log - direct-nlopt-rs: NLOPT DIRECT algorithm family in Rust
+
+
+## Iteration 0 — Project Setup & Ralph Initialization (2026-02-21)
+
+### What was implemented
+- Initialized git repository in `direct-nlopt-rs/` with basic Rust project structure
+- Created feature branch `feature/nlopt-direct-faithful-implementation` for all ralph-driven changes
+- Created Cargo.toml with dependencies: rayon, parking_lot, thiserror, ordered-float, libc, etc.
+- Created src/lib.rs crate root with module declarations
+- Created src/error.rs with DirectReturnCode and DirectError types matching NLOPT's direct_return_code enum
+- Created benches/benchmarks.rs placeholder for Criterion benchmarks
+- Created .gitignore
+- Thoroughly analyzed both NLOPT DIRECT implementations:
+  - Gablonsky Fortran→C translation (DIRect.c, DIRsubrout.c, DIRserial.c, direct_wrap.c): ~2600 lines
+  - SGJ C re-implementation (cdirect.c, hybrid.c): ~950 lines
+- Generated permanent context prompt (prompts/direct-nlopt-rs.txt) with full project context,
+  NLOPT C → Rust function mapping tables for both implementations, data structure correspondence,
+  algorithm flow documentation, parallelization strategy, and task instructions
+- Generated PRD plan (plans/prd-direct-nlopt.json) with 54 ordered tasks across 12 categories:
+  analysis (5), implementation (10), test-foundation (1), test-unit (7), test-integration (11),
+  parallelization (4), performance (3), ffi (1), edge-cases (3), test-regression (3), documentation (2)
+- Verified Rust project builds successfully
+
+### Files created
+- direct-nlopt-rs/.gitignore
+- direct-nlopt-rs/Cargo.toml
+- direct-nlopt-rs/src/lib.rs
+- direct-nlopt-rs/src/error.rs
+- direct-nlopt-rs/benches/benchmarks.rs
+- prompts/direct-nlopt-rs.txt (permanent context prompt for ralph)
+- plans/prd-direct-nlopt.json (54-item PRD plan)
+
+### Git commits
+- `df12538` chore(init): initialize direct-nlopt-rs project with basic structure
+
+### Test results
+- Project builds successfully (cargo build)
+- No tests yet (baseline)
+
+### Notes
+- Two NLOPT DIRECT codepaths must be ported: Gablonsky translation AND SGJ re-implementation
+- The Gablonsky translation uses SoA + linked lists (similar to scipy port in direct-rs/)
+- The SGJ re-implementation uses red-black trees (cleaner but different data structure)
+- Both codepaths must produce identical results to their NLOPT C counterparts
+- Parallelization via rayon should be added at function evaluation points
+- The venv/ folder has Python 3.12 for any comparison scripts needed
