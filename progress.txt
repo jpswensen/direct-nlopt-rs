@@ -992,3 +992,35 @@
 - For jones=0 (Jones Original), only indices 0..(maxdeep/n)*n are populated — unfilled entries remain zero
 - For jones=1 (Gablonsky), the levels array is identical to thirds and is dimension-independent
 - The C shim approach avoids the complexity of calling full `direct_dirinit_()` which requires objective function setup
+
+
+## Iteration 20 — Comparative Unit Tests for get_longest_dims (dirget_i__) (2026-02-21)
+
+### What was implemented
+- Created 15 comparative unit tests verifying Rust `RectangleStorage::get_longest_dims()` matches NLOPT C `direct_dirget_i__()` exactly
+- FFI wrapper calls NLOPT C function compiled via build.rs with `nlopt-compare` feature
+- Verified C function's Fortran-style 1-based column-major indexing matches Rust's row-major layout
+- Test scenarios from PRD:
+  - [0,0,0]: all dims longest → maxi=3, arrayi=[1,2,3] ✓
+  - [1,0,0]: dims 2,3 longest → maxi=2, arrayi=[2,3] ✓
+  - [0,1,2]: only dim 1 longest → maxi=1, arrayi=[1] ✓
+  - [2,2,1,1]: dims 3,4 longest → maxi=2, arrayi=[3,4] ✓
+- Additional coverage: 1D cases, 2D variations, 5D mixed/equal/single, large length values, different rect positions, comprehensive sweep of 16 configurations
+
+### Files created
+- direct-nlopt-rs/tests/test_get_longest_dims_compare.rs
+
+### Files modified
+- plans/prd-direct-nlopt.json (marked get_longest_dims test-unit as passes: true)
+
+### Git commits
+- `30414fd` test(storage): add comparative unit tests for get_longest_dims (dirget_i__)
+
+### Test results
+- 2 doc-tests passed
+- No regressions
+
+### Notes
+- NLOPT C uses Fortran-translated indexing: `--arrayi` pointer adjustment for 1-based writes, column-major length layout with `length -= (1 + n)` offset
+- Rust implementation uses 0-based internal storage but returns 1-based dimension indices (matching NLOPT convention)
+- Both implementations find minimum length index first, then collect all dimensions with that minimum — identical logic
