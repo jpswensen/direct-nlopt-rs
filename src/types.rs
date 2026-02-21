@@ -209,6 +209,14 @@ pub struct DirectOptions {
     /// Enable parallel function evaluation using rayon.
     /// When `false`, evaluation order is identical to NLOPT C (bit-exact results).
     pub parallel: bool,
+
+    /// Enable batch parallelization across multiple selected rectangles.
+    /// When `true` (and `parallel` is also `true`), ALL sample points from
+    /// ALL selected rectangles in an iteration are collected and evaluated
+    /// in a single parallel batch, rather than per-rectangle.
+    /// This can improve throughput when the objective function is expensive.
+    /// Results may differ from sequential mode due to evaluation order.
+    pub parallel_batch: bool,
 }
 
 impl Default for DirectOptions {
@@ -226,6 +234,7 @@ impl Default for DirectOptions {
             fglobal_reltol: DIRECT_UNKNOWN_FGLOBAL_RELTOL,
             algorithm: DirectAlgorithm::default(),
             parallel: false,
+            parallel_batch: false,
         }
     }
 }
@@ -462,6 +471,7 @@ mod tests {
         assert_eq!(opts.fglobal_reltol, DIRECT_UNKNOWN_FGLOBAL_RELTOL);
         assert_eq!(opts.algorithm, DirectAlgorithm::LocallyBiased);
         assert!(!opts.parallel);
+        assert!(!opts.parallel_batch);
     }
 
     #[test]

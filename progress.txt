@@ -1629,3 +1629,51 @@
 - Sphere centered at origin trivially finds minf=0.0 in all dimensions
 - The Original algorithm's nfev exceeds maxfeval more than Gablonsky due to batch processing
 - Higher dimensions stress-test the thirds/levels precomputation and linked list management
+
+
+## Iteration 37 — Batch parallelization across selected rectangles (2026-02-21)
+
+### What was implemented
+- Added `parallel_batch` option to `DirectOptions` (default: false)
+  - When both `parallel=true` and `parallel_batch=true`, ALL sample points from ALL
+    selected rectangles in an iteration are collected and evaluated in a single
+    parallel batch via rayon, rather than per-rectangle
+  - When `parallel=false`, `parallel_batch` is ignored (sequential path identical to NLOPT C)
+- Implemented `process_selected_rects_batch()` method in Direct with 4 phases:
+  - Phase 1: For each selected rect — remove from list, get longest dims, create sample points
+  - Phase 2: Collect ALL sample point coordinates across all rects into a flat Vec
+  - Phase 3: Evaluate ALL points in one `par_iter()` batch
+  - Phase 4: Apply results, divide, and insert sequentially per rectangle
+- Modified `minimize()` main loop to dispatch to batch path when both options are enabled
+- Also marked the previously-completed hidden constraints and per-rect parallelization
+  PRD items as `passes: true` (they were already implemented but not marked)
+- Added 8 new unit tests:
+  - test_batch_parallel_sphere_2d_gablonsky
+  - test_batch_parallel_sphere_2d_original
+  - test_batch_parallel_vs_serial_sphere
+  - test_batch_parallel_vs_per_rect_parallel
+  - test_batch_parallel_rosenbrock
+  - test_batch_parallel_with_infeasible
+  - test_batch_parallel_disabled_when_not_parallel
+  - test_batch_parallel_5d_sphere
+
+### Files modified
+- direct-nlopt-rs/src/types.rs (added `parallel_batch` field to DirectOptions)
+- direct-nlopt-rs/src/direct.rs (added `process_selected_rects_batch()`, modified `minimize()` main loop, added 8 tests)
+- plans/prd-direct-nlopt.json (marked hidden constraints, per-rect parallel, and batch parallel as passes: true)
+
+### Git commits
+- `c672c26` feat(direct): implement batch parallelization across multiple selected rectangles
+
+### Test results
+- 8 new batch parallelization tests passed, 0 failed
+- Full suite: 196 tests pass (was 188), no regressions
+- Clippy: no new warnings
+
+### Notes
+- Batch parallel mode may produce slightly different results from sequential due to evaluation order
+  affecting fmax tracking and infeasible point replacement
+- When parallel_batch=true but parallel=false, the sequential path is used (verified by test)
+- The batch approach reduces rayon overhead by amortizing thread pool dispatch across all rects
+- For expensive objective functions with many selected rectangles per iteration, this can
+  provide significant throughput improvement over per-rectangle parallel evaluation

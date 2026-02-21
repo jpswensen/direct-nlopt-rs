@@ -646,6 +646,190 @@ impl Direct {
     }
 
     // ──────────────────────────────────────────────────────────────────────
+    // Batch evaluate — parallel evaluation across multiple selected rects
+    // ──────────────────────────────────────────────────────────────────────
+
+    /// Evaluate ALL sample points from multiple selected rectangles in one
+    /// parallel batch, then divide and insert each rectangle sequentially.
+    ///
+    /// This is an optimization over the default per-rectangle loop:
+    /// instead of (sample → evaluate → divide) per rect, we do:
+    /// 1. For each selected rect: remove from list, get longest dims, create sample points
+    /// 2. Evaluate ALL sample points across all rects in one parallel batch
+    /// 3. For each rect: divide and insert children
+    ///
+    /// Returns `Some(DirectReturnCode)` if a termination condition was hit.
+    fn process_selected_rects_batch(
+        &mut self,
+        po: &crate::storage::PotentiallyOptimal,
+        mdeep: i32,
+        start_time: &std::time::Instant,
+    ) -> std::result::Result<Option<crate::error::DirectReturnCode>, DirectError> {
+        use crate::error::DirectReturnCode;
+
+        // Phase 1: Prepare all selected rectangles — collect metadata and create sample points
+        struct RectInfo {
+            help_idx: usize,
+            actdeep_div: i32,
+            arrayi: Vec<usize>,
+            maxi: usize,
+            new_start: usize,
+        }
+
+        let mut rect_infos: Vec<RectInfo> = Vec::new();
+
+        for j in 0..po.count {
+            let actdeep = po.rect_levels[j];
+            let help = po.indices[j];
+
+            if help <= 0 {
+                continue;
+            }
+
+            let help_idx = help as usize;
+
+            let actdeep_div = self.storage.get_max_deep(help_idx);
+            let delta = self.storage.thirds[(actdeep_div + 1) as usize];
+
+            if actdeep + 1 >= mdeep {
+                return Ok(Some(DirectReturnCode::OutOfMemory));
+            }
+
+            self.actmaxdeep = self.actmaxdeep.max(actdeep);
+
+            // Remove rectangle from anchor list
+            self.storage.remove_from_list_at_depth(help_idx, actdeep);
+
+            // Get longest dimensions
+            let (arrayi, maxi) = self.storage.get_longest_dims(help_idx);
+
+            // Create sample points (allocates from free list, sets offsets)
+            let new_start = self.sample_points(help_idx, &arrayi, delta)?;
+
+            rect_infos.push(RectInfo {
+                help_idx,
+                actdeep_div,
+                arrayi,
+                maxi,
+                new_start,
+            });
+        }
+
+        if rect_infos.is_empty() {
+            return Ok(None);
+        }
+
+        // Phase 2: Collect ALL sample point coordinates across all rects
+        let n = self.dim;
+        let mut all_indices: Vec<usize> = Vec::new();
+        let mut all_points: Vec<Vec<f64>> = Vec::new();
+        let mut rect_boundaries: Vec<(usize, usize)> = Vec::new(); // (start_in_all, count)
+
+        for info in &rect_infos {
+            let total = 2 * info.maxi;
+            let start_idx = all_indices.len();
+
+            let mut pos = info.new_start;
+            for _ in 0..total {
+                all_indices.push(pos);
+                let x_norm: Vec<f64> = (0..n)
+                    .map(|i| self.storage.center(pos, i))
+                    .collect();
+                all_points.push(x_norm);
+                pos = self.storage.point[pos] as usize;
+            }
+
+            rect_boundaries.push((start_idx, total));
+        }
+
+        // Phase 3: Evaluate ALL points in one parallel batch
+        let func = Arc::clone(&self.func);
+        let force_stop = Arc::clone(&self.force_stop);
+        let xs1 = &self.xs1;
+        let xs2 = &self.xs2;
+        let fmax_before = self.fmax;
+
+        let results: Vec<(f64, i32)> = all_points
+            .par_iter()
+            .map(|x_norm| {
+                if force_stop.load(Ordering::Relaxed) {
+                    (fmax_before, -1)
+                } else {
+                    let mut x_actual = vec![0.0; n];
+                    for i in 0..n {
+                        x_actual[i] = (x_norm[i] + xs2[i]) * xs1[i];
+                    }
+                    let f = func(&x_actual);
+                    if f.is_finite() {
+                        (f, 0)
+                    } else {
+                        (f64::MAX, 1)
+                    }
+                }
+            })
+            .collect();
+
+        self.nfev += all_indices.len();
+
+        // Phase 4: Apply results to storage sequentially, per rectangle
+        for (rect_idx, info) in rect_infos.iter().enumerate() {
+            let (start_in_all, count) = rect_boundaries[rect_idx];
+
+            // Apply evaluation results for this rect's sample points
+            for k in 0..count {
+                let global_k = start_in_all + k;
+                let idx = all_indices[global_k];
+                let (f_val, kret) = results[global_k];
+                self.iinfeasible = self.iinfeasible.max(kret);
+
+                if kret == 0 {
+                    self.storage.set_f(idx, f_val, 0.0);
+                    self.ifeasible_f = 0;
+                    self.fmax = self.fmax.max(f_val);
+                } else if kret >= 1 {
+                    self.storage.set_f(idx, self.fmax, 2.0);
+                } else {
+                    self.storage.set_f(idx, self.fmax, -1.0);
+                }
+            }
+
+            // Update minf/minpos for this rect's sample points
+            for k in 0..count {
+                let idx = all_indices[start_in_all + k];
+                if self.storage.f_val(idx) < self.minf
+                    && self.storage.f_flag(idx) == 0.0
+                {
+                    self.minf = self.storage.f_val(idx);
+                    self.minpos = idx;
+                }
+            }
+
+            // Check force_stop
+            if self.force_stop.load(Ordering::Relaxed) {
+                return Ok(Some(DirectReturnCode::ForcedStop));
+            }
+
+            // Check max time
+            if self.options.max_time > 0.0
+                && start_time.elapsed().as_secs_f64() >= self.options.max_time
+            {
+                return Ok(Some(DirectReturnCode::MaxTimeExceeded));
+            }
+
+            // Divide the rectangle
+            self.divide_rectangle(info.new_start, info.actdeep_div, info.help_idx, &info.arrayi, info.maxi);
+
+            // Insert new rects into sorted lists
+            let jones = self.jones();
+            let mut start_chain = info.new_start as i32;
+            self.storage
+                .insert_into_list(&mut start_chain, info.maxi, info.help_idx, jones);
+        }
+
+        Ok(None)
+    }
+
+    // ──────────────────────────────────────────────────────────────────────
     // Divide rectangle — matches direct_dirdivide_() in DIRsubrout.c
     // ──────────────────────────────────────────────────────────────────────
 
@@ -891,77 +1075,89 @@ impl Direct {
 
             let oldpos = self.minpos;
 
-            // 3c. Process each selected rectangle
-            // (DIRect.c lines 487-607)
-            let maxpos = po.count;
-            for j in 0..maxpos {
-                let actdeep = po.rect_levels[j];
-                let help = po.indices[j];
-
-                // Skip if this slot was eliminated (0 = empty)
-                if help <= 0 {
-                    continue;
+            // 3c. Process selected rectangles
+            // When parallel_batch is enabled, evaluate all sample points in one batch.
+            // Otherwise, process each rectangle sequentially (matching NLOPT C).
+            if self.options.parallel && self.options.parallel_batch {
+                // Batch parallel path: collect all sample points, evaluate in one batch
+                let batch_code = self.process_selected_rects_batch(&po, mdeep, &start_time)?;
+                if let Some(code) = batch_code {
+                    return_code = Some(code);
                 }
+                // Update numfunc from nfev (batch path updates nfev directly)
+                numfunc = self.nfev;
+            } else {
+                // Sequential path (DIRect.c lines 487-607)
+                let maxpos = po.count;
+                for j in 0..maxpos {
+                    let actdeep = po.rect_levels[j];
+                    let help = po.indices[j];
 
-                let help_idx = help as usize;
+                    // Skip if this slot was eliminated (0 = empty)
+                    if help <= 0 {
+                        continue;
+                    }
 
-                // Compute delta for sampling (DIRect.c lines 501-503)
-                let actdeep_div = self.storage.get_max_deep(help_idx);
-                let delta = self.storage.thirds[(actdeep_div + 1) as usize];
+                    let help_idx = help as usize;
 
-                // Check max depth (DIRect.c lines 510-515)
-                if actdeep + 1 >= mdeep {
-                    return_code = Some(DirectReturnCode::OutOfMemory);
-                    break;
+                    // Compute delta for sampling (DIRect.c lines 501-503)
+                    let actdeep_div = self.storage.get_max_deep(help_idx);
+                    let delta = self.storage.thirds[(actdeep_div + 1) as usize];
+
+                    // Check max depth (DIRect.c lines 510-515)
+                    if actdeep + 1 >= mdeep {
+                        return_code = Some(DirectReturnCode::OutOfMemory);
+                        break;
+                    }
+
+                    // Update actmaxdeep (DIRect.c line 517)
+                    self.actmaxdeep = self.actmaxdeep.max(actdeep);
+
+                    // Remove rectangle from anchor list (DIRect.c lines 518-528)
+                    self.storage.remove_from_list_at_depth(help_idx, actdeep);
+
+                    // Handle infeasible depth: if actdeep < 0, read from f-value
+                    // (DIRect.c lines 529-531)
+                    let _actdeep_for_division = if actdeep < 0 {
+                        self.storage.f_val(help_idx) as i32
+                    } else {
+                        actdeep
+                    };
+
+                    // Get longest dimensions (DIRect.c line 536)
+                    let (arrayi, maxi) = self.storage.get_longest_dims(help_idx);
+
+                    // Sample new points (DIRect.c lines 542-551)
+                    let new_start = self.sample_points(help_idx, &arrayi, delta)?;
+
+                    // Evaluate sample points (DIRect.c lines 556-568)
+                    self.evaluate_sample_points(new_start, maxi)?;
+
+                    // Check force_stop (DIRect.c lines 569-572)
+                    if self.force_stop.load(Ordering::Relaxed) {
+                        return_code = Some(DirectReturnCode::ForcedStop);
+                        break;
+                    }
+
+                    // Check max time (DIRect.c lines 573-576)
+                    if self.options.max_time > 0.0
+                        && start_time.elapsed().as_secs_f64() >= self.options.max_time
+                    {
+                        return_code = Some(DirectReturnCode::MaxTimeExceeded);
+                        break;
+                    }
+
+                    // Divide the rectangle (DIRect.c lines 581-583)
+                    self.divide_rectangle(new_start, actdeep_div, help_idx, &arrayi, maxi);
+
+                    // Insert new rects into sorted lists (DIRect.c lines 588-590)
+                    let mut start_chain = new_start as i32;
+                    self.storage
+                        .insert_into_list(&mut start_chain, maxi, help_idx, jones);
+
+                    // Update function evaluation count (DIRect.c lines 595-596)
+                    numfunc += 2 * maxi;
                 }
-
-                // Update actmaxdeep (DIRect.c line 517)
-                self.actmaxdeep = self.actmaxdeep.max(actdeep);
-
-                // Remove rectangle from anchor list (DIRect.c lines 518-528)
-                self.storage.remove_from_list_at_depth(help_idx, actdeep);
-
-                // Handle infeasible depth: if actdeep < 0, read from f-value
-                // (DIRect.c lines 529-531)
-                let _actdeep_for_division = if actdeep < 0 {
-                    self.storage.f_val(help_idx) as i32
-                } else {
-                    actdeep
-                };
-
-                // Get longest dimensions (DIRect.c line 536)
-                let (arrayi, maxi) = self.storage.get_longest_dims(help_idx);
-
-                // Sample new points (DIRect.c lines 542-551)
-                let new_start = self.sample_points(help_idx, &arrayi, delta)?;
-
-                // Evaluate sample points (DIRect.c lines 556-568)
-                self.evaluate_sample_points(new_start, maxi)?;
-
-                // Check force_stop (DIRect.c lines 569-572)
-                if self.force_stop.load(Ordering::Relaxed) {
-                    return_code = Some(DirectReturnCode::ForcedStop);
-                    break;
-                }
-
-                // Check max time (DIRect.c lines 573-576)
-                if self.options.max_time > 0.0
-                    && start_time.elapsed().as_secs_f64() >= self.options.max_time
-                {
-                    return_code = Some(DirectReturnCode::MaxTimeExceeded);
-                    break;
-                }
-
-                // Divide the rectangle (DIRect.c lines 581-583)
-                self.divide_rectangle(new_start, actdeep_div, help_idx, &arrayi, maxi);
-
-                // Insert new rects into sorted lists (DIRect.c lines 588-590)
-                let mut start_chain = new_start as i32;
-                self.storage
-                    .insert_into_list(&mut start_chain, maxi, help_idx, jones);
-
-                // Update function evaluation count (DIRect.c lines 595-596)
-                numfunc += 2 * maxi;
             }
 
             // Break out if we got a return code during rectangle processing
@@ -2955,5 +3151,206 @@ mod tests {
         assert!(result.nfev > 0);
         assert!(result.nit > 0);
         assert!(!result.message.is_empty());
+    }
+
+    // ────────────────────────────────────────────────────────────────
+    // Batch parallelization tests
+    // ────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_batch_parallel_sphere_2d_gablonsky() {
+        let bounds = vec![(-5.0, 5.0); 2];
+        let opts = DirectOptions {
+            max_feval: 200,
+            parallel: true,
+            parallel_batch: true,
+            algorithm: DirectAlgorithm::GablonskyLocallyBiased,
+            ..Default::default()
+        };
+        let mut d = Direct::new(sphere, &bounds, opts).unwrap();
+        let result = d.minimize(None).unwrap();
+
+        assert!(result.success);
+        assert!(result.fun < 1.0, "batch parallel sphere should converge, got f={}", result.fun);
+        assert!(result.nfev > 0);
+    }
+
+    #[test]
+    fn test_batch_parallel_sphere_2d_original() {
+        let bounds = vec![(-5.0, 5.0); 2];
+        let opts = DirectOptions {
+            max_feval: 200,
+            parallel: true,
+            parallel_batch: true,
+            algorithm: DirectAlgorithm::GablonskyOriginal,
+            ..Default::default()
+        };
+        let mut d = Direct::new(sphere, &bounds, opts).unwrap();
+        let result = d.minimize(None).unwrap();
+
+        assert!(result.success);
+        assert!(result.fun < 1.0, "batch parallel Original should converge, got f={}", result.fun);
+    }
+
+    #[test]
+    fn test_batch_parallel_vs_serial_sphere() {
+        // Batch parallel and serial should both find good solutions
+        let bounds = vec![(-5.0, 5.0); 2];
+
+        let opts_serial = DirectOptions {
+            max_feval: 500,
+            parallel: false,
+            parallel_batch: false,
+            algorithm: DirectAlgorithm::GablonskyLocallyBiased,
+            ..Default::default()
+        };
+        let mut d_serial = Direct::new(sphere, &bounds, opts_serial).unwrap();
+        let result_serial = d_serial.minimize(None).unwrap();
+
+        let opts_batch = DirectOptions {
+            max_feval: 500,
+            parallel: true,
+            parallel_batch: true,
+            algorithm: DirectAlgorithm::GablonskyLocallyBiased,
+            ..Default::default()
+        };
+        let mut d_batch = Direct::new(sphere, &bounds, opts_batch).unwrap();
+        let result_batch = d_batch.minimize(None).unwrap();
+
+        assert!(result_serial.success);
+        assert!(result_batch.success);
+        // Both should find a good solution (may differ due to evaluation order)
+        assert!(result_serial.fun < 0.5, "serial f={}", result_serial.fun);
+        assert!(result_batch.fun < 0.5, "batch f={}", result_batch.fun);
+    }
+
+    #[test]
+    fn test_batch_parallel_vs_per_rect_parallel() {
+        // Compare per-rect parallel (parallel=true, parallel_batch=false)
+        // vs batch parallel (parallel=true, parallel_batch=true)
+        let bounds = vec![(-5.0, 5.0); 3];
+
+        let opts_per_rect = DirectOptions {
+            max_feval: 500,
+            parallel: true,
+            parallel_batch: false,
+            algorithm: DirectAlgorithm::GablonskyLocallyBiased,
+            ..Default::default()
+        };
+        let mut d1 = Direct::new(sphere, &bounds, opts_per_rect).unwrap();
+        let r1 = d1.minimize(None).unwrap();
+
+        let opts_batch = DirectOptions {
+            max_feval: 500,
+            parallel: true,
+            parallel_batch: true,
+            algorithm: DirectAlgorithm::GablonskyLocallyBiased,
+            ..Default::default()
+        };
+        let mut d2 = Direct::new(sphere, &bounds, opts_batch).unwrap();
+        let r2 = d2.minimize(None).unwrap();
+
+        assert!(r1.success);
+        assert!(r2.success);
+        assert!(r1.fun < 1.0, "per-rect parallel f={}", r1.fun);
+        assert!(r2.fun < 1.0, "batch parallel f={}", r2.fun);
+    }
+
+    #[test]
+    fn test_batch_parallel_rosenbrock() {
+        fn rosenbrock(x: &[f64]) -> f64 {
+            let mut sum = 0.0;
+            for i in 0..x.len() - 1 {
+                sum += 100.0 * (x[i + 1] - x[i] * x[i]).powi(2) + (1.0 - x[i]).powi(2);
+            }
+            sum
+        }
+
+        let bounds = vec![(-5.0, 5.0); 2];
+        let opts = DirectOptions {
+            max_feval: 1000,
+            parallel: true,
+            parallel_batch: true,
+            algorithm: DirectAlgorithm::GablonskyLocallyBiased,
+            ..Default::default()
+        };
+        let mut d = Direct::new(rosenbrock, &bounds, opts).unwrap();
+        let result = d.minimize(None).unwrap();
+
+        assert!(result.success);
+        assert!(result.fun < 50.0, "batch Rosenbrock should make progress, got f={}", result.fun);
+    }
+
+    #[test]
+    fn test_batch_parallel_with_infeasible() {
+        fn constrained_sphere(x: &[f64]) -> f64 {
+            let r_sq: f64 = x.iter().map(|xi| xi * xi).sum();
+            if r_sq > 9.0 { f64::NAN } else { r_sq }
+        }
+
+        let bounds = vec![(-5.0, 5.0); 2];
+        let opts = DirectOptions {
+            max_feval: 500,
+            parallel: true,
+            parallel_batch: true,
+            algorithm: DirectAlgorithm::GablonskyLocallyBiased,
+            ..Default::default()
+        };
+        let mut d = Direct::new(constrained_sphere, &bounds, opts).unwrap();
+        let result = d.minimize(None).unwrap();
+
+        assert!(result.success);
+        assert!(result.fun < 1.0, "batch with infeasible f={}", result.fun);
+    }
+
+    #[test]
+    fn test_batch_parallel_disabled_when_not_parallel() {
+        // parallel_batch=true but parallel=false should use sequential path
+        let bounds = vec![(-5.0, 5.0); 2];
+        let opts = DirectOptions {
+            max_feval: 200,
+            parallel: false,
+            parallel_batch: true,
+            algorithm: DirectAlgorithm::GablonskyLocallyBiased,
+            ..Default::default()
+        };
+        let mut d = Direct::new(sphere, &bounds, opts).unwrap();
+        let result = d.minimize(None).unwrap();
+
+        // Should still work correctly (uses sequential path)
+        assert!(result.success);
+        assert!(result.fun < 1.0);
+
+        // Should match pure serial exactly
+        let opts_serial = DirectOptions {
+            max_feval: 200,
+            parallel: false,
+            parallel_batch: false,
+            algorithm: DirectAlgorithm::GablonskyLocallyBiased,
+            ..Default::default()
+        };
+        let mut d_serial = Direct::new(sphere, &bounds, opts_serial).unwrap();
+        let result_serial = d_serial.minimize(None).unwrap();
+
+        assert_eq!(result.fun, result_serial.fun, "serial results should be identical");
+        assert_eq!(result.nfev, result_serial.nfev, "nfev should match");
+        assert_eq!(result.x, result_serial.x, "x should match");
+    }
+
+    #[test]
+    fn test_batch_parallel_5d_sphere() {
+        let bounds = vec![(-5.0, 5.0); 5];
+        let opts = DirectOptions {
+            max_feval: 2000,
+            parallel: true,
+            parallel_batch: true,
+            algorithm: DirectAlgorithm::GablonskyLocallyBiased,
+            ..Default::default()
+        };
+        let mut d = Direct::new(sphere, &bounds, opts).unwrap();
+        let result = d.minimize(None).unwrap();
+
+        assert!(result.success);
+        assert!(result.fun < 5.0, "5D batch parallel f={}", result.fun);
     }
 }
