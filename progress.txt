@@ -2200,3 +2200,59 @@
   each suite filters to specific patterns rather than running all tests
 - Performance comparison (--perf) runs test_benchmark_comparison and extracts the markdown table
 - For full CI, recommend running with --release for faster execution and realistic performance data
+
+
+## Iteration 13 — Add comprehensive documentation with NLOPT correspondence (2026-02-21)
+
+### What was implemented
+- Enhanced crate-level documentation in lib.rs with:
+  - Detailed algorithm overview explaining DIRECT's approach (derivative-free, bounded domain)
+  - Quick start examples using both `minimize()` and `DirectBuilder`
+  - Complete algorithm variants table (all 8 variants with NLOPT names and backend info)
+  - Parallelization strategy documentation (when to use parallel, batch, thresholds)
+  - Termination criteria section covering all stopping conditions
+  - Full references section
+- Created comprehensive README.md with:
+  - Project overview explaining both NLOPT backends
+  - Usage examples: quick start, builder pattern, full configuration, callbacks, hidden constraints
+  - Algorithm variant selection guide ("Which Variant to Choose?")
+  - Complete NLOPT C → Rust function mapping tables for both Gablonsky and CDirect backends
+  - Data structure correspondence table (NLOPT C variables → Rust fields)
+  - Parallelization guide with options table and when-to-use recommendations
+  - Performance notes, C FFI section, feature flags, termination criteria
+  - References and license information
+- Created DIFFERENCES.md documenting all known behavioral differences:
+  - Bit-exact equivalence guarantee in serial mode
+  - Intentionally replicated NLOPT bug (dirreplaceinf_ transposed array access)
+  - No hybrid mode support
+  - Parallel evaluation order differences
+  - CDirect limitations (no parallel, no infeasible handling)
+  - Memory allocation strategy differences
+  - Floating-point accumulation at high dimensions
+  - Unsupported NLOPT features (hybrid, MPI, stopping object)
+- All public API items already had doc comments with examples (verified existing documentation
+  on DirectBuilder, direct_optimize, minimize, minimize_l, minimize_randomized, DirectOptions,
+  DirectAlgorithm, DirectResult, DirectReturnCode, ObjectiveFn, CallbackFn, Bounds)
+
+### Files created
+- direct-nlopt-rs/README.md
+- direct-nlopt-rs/DIFFERENCES.md
+
+### Files modified
+- direct-nlopt-rs/src/lib.rs (enhanced crate-level documentation)
+- plans/prd-direct-nlopt.json (marked documentation task as passes: true)
+
+### Git commits
+- `8282c77` docs(crate): add comprehensive documentation with NLOPT correspondence
+
+### Test results
+- All 207 unit tests pass, 3 doc tests pass
+- All integration tests pass with nlopt-compare feature (533+ total)
+- No regressions
+- Clippy: only pre-existing warnings, no new issues
+
+### Notes
+- All public API types and functions already had thorough doc comments from previous iterations
+- README.md includes working code examples (not tested as doc tests since they're markdown)
+- DIFFERENCES.md explicitly documents the replicated dirreplaceinf_ bug for transparency
+- The documentation task is now complete; only the inline documentation task remains

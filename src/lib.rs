@@ -1,32 +1,98 @@
 //! # DIRECT-NLOPT-RS: NLOPT DIRECT/DIRECT-L Global Optimization in Rust
 //!
 //! A faithful Rust-native implementation of the NLOPT DIRECT (DIviding RECTangles)
-//! and DIRECT-L global optimization algorithms, with rayon parallelization where
-//! appropriate.
+//! and DIRECT-L global optimization algorithms, with optional rayon parallelization.
 //!
 //! ## Overview
 //!
-//! This crate is a 100% faithful port of the NLOPT implementation of the DIRECT
-//! algorithm family. The NLOPT implementation includes two separate codebases:
+//! DIRECT is a deterministic, derivative-free global optimization algorithm that
+//! works by recursively dividing the search space into hyperrectangles and
+//! evaluating the objective at their centers. It does not require gradients,
+//! smoothness, or convexity — only a bounded search domain.
 //!
-//! 1. **Gablonsky Fortran→C translation** (`algs/direct/`): A translation of
-//!    Gablonsky's original Fortran DIRECT implementation to C, done by Steven G.
-//!    Johnson. Supports `DIRECT_ORIGINAL` (Jones 1993) and `DIRECT_GABLONSKY`
-//!    (Gablonsky 2001, locally-biased).
+//! This crate is a 100% faithful port of **both** NLOPT DIRECT implementations,
+//! ensuring identical results (in serial mode) to the original NLOPT C code:
 //!
-//! 2. **SGJ C re-implementation** (`algs/cdirect/`): A from-scratch C implementation
+//! 1. **Gablonsky Fortran→C translation** (`algs/direct/`): Translated from
+//!    Gablonsky's original Fortran code by Steven G. Johnson. Uses Struct-of-Arrays
+//!    (SoA) layout with linked lists. Supports `DIRECT_ORIGINAL` (Jones 1993) and
+//!    `DIRECT_GABLONSKY` (Gablonsky 2001, locally-biased).
+//!
+//! 2. **SGJ C re-implementation** (`algs/cdirect/`): From-scratch C implementation
 //!    by Steven G. Johnson using red-black trees. Supports DIRECT, DIRECT-L,
-//!    randomized variants, and a hybrid DIRECT + local optimizer.
+//!    randomized variants, and unscaled coordinate modes.
 //!
-//! This Rust crate implements BOTH codepaths faithfully, ensuring identical results
-//! (without parallelization) to the original NLOPT C code.
+//! ## Quick Start
+//!
+//! ```rust
+//! use direct_nlopt::{minimize, DirectBuilder, DirectAlgorithm, DirectOptions};
+//!
+//! // Simple: minimize sphere function with DIRECT-L
+//! let result = minimize(
+//!     |x: &[f64]| x.iter().map(|xi| xi * xi).sum(),
+//!     &vec![(-5.0, 5.0), (-5.0, 5.0)],
+//!     500,
+//! ).unwrap();
+//! assert!(result.fun < 1e-2);
+//!
+//! // Builder pattern with full control
+//! let result = DirectBuilder::new(
+//!     |x: &[f64]| x[0] * x[0] + x[1] * x[1],
+//!     vec![(-5.0, 5.0), (-5.0, 5.0)],
+//! )
+//! .algorithm(DirectAlgorithm::GablonskyLocallyBiased)
+//! .max_feval(1000)
+//! .parallel(true)
+//! .minimize()
+//! .unwrap();
+//! assert!(result.fun < 1e-4);
+//! ```
 //!
 //! ## Algorithm Variants
 //!
-//! - **DIRECT (Original, Jones 1993)**: `DirectAlgorithm::Original`
-//! - **DIRECT-L (Gablonsky 2001)**: `DirectAlgorithm::LocallyBiased`
-//! - **DIRECT Randomized**: `DirectAlgorithm::Randomized`
-//! - **DIRECT-L Randomized**: `DirectAlgorithm::LocallyBiasedRandomized`
+//! All eight NLOPT DIRECT variants are supported:
+//!
+//! | Rust Variant | NLOPT Name | Backend | Description |
+//! |---|---|---|---|
+//! | [`DirectAlgorithm::Original`] | `GN_DIRECT` | CDirect | Jones' original DIRECT (1993) |
+//! | [`DirectAlgorithm::LocallyBiased`] | `GN_DIRECT_L` | CDirect | DIRECT-L, locally biased (default) |
+//! | [`DirectAlgorithm::Randomized`] | `GN_DIRECT_L_RAND` | CDirect | DIRECT-L with randomized tie-breaking |
+//! | [`DirectAlgorithm::OriginalUnscaled`] | `GN_DIRECT_NOSCAL` | CDirect | Original, unscaled coordinates |
+//! | [`DirectAlgorithm::LocallyBiasedUnscaled`] | `GN_DIRECT_L_NOSCAL` | CDirect | DIRECT-L, unscaled |
+//! | [`DirectAlgorithm::LocallyBiasedRandomizedUnscaled`] | `GN_DIRECT_L_RAND_NOSCAL` | CDirect | DIRECT-L randomized, unscaled |
+//! | [`DirectAlgorithm::GablonskyOriginal`] | `GN_ORIG_DIRECT` | Gablonsky | Jones' original via Fortran translation |
+//! | [`DirectAlgorithm::GablonskyLocallyBiased`] | `GN_ORIG_DIRECT_L` | Gablonsky | DIRECT-L via Fortran translation |
+//!
+//! The **CDirect** backend uses a BTreeMap (red-black tree equivalent) for rectangle
+//! storage, while the **Gablonsky** backend uses SoA arrays with linked lists, matching
+//! NLOPT's two internal implementations exactly.
+//!
+//! ## Parallelization
+//!
+//! Function evaluations can be parallelized using [rayon](https://docs.rs/rayon):
+//!
+//! - **`parallel: true`** — Evaluates the 2×d sample points per rectangle in parallel.
+//!   Best when the objective function is expensive relative to rayon overhead (~1–5 µs).
+//! - **`parallel_batch: true`** — Additionally batches evaluations across all selected
+//!   rectangles in an iteration. Maximizes throughput for expensive objectives.
+//! - **`min_parallel_evals`** — Threshold below which the serial path is used even when
+//!   `parallel` is `true`. Default: 4 (avoids overhead for 1D/2D problems).
+//! - **Serial mode (`parallel: false`)** — Produces results **bit-identical** to NLOPT C.
+//!
+//! Parallelization is only available for the Gablonsky backend
+//! (`GablonskyOriginal`, `GablonskyLocallyBiased`).
+//!
+//! ## Termination Criteria
+//!
+//! Multiple stopping conditions are supported, matching NLOPT:
+//!
+//! - `max_feval` — Maximum number of function evaluations
+//! - `max_iter` — Maximum number of iterations
+//! - `max_time` — Maximum wall-clock time (seconds)
+//! - `fglobal` / `fglobal_reltol` — Stop when known global minimum is reached
+//! - `volume_reltol` — Stop when smallest rectangle volume is below threshold
+//! - `sigma_reltol` — Stop when rectangle measure is below threshold
+//! - Callback returning `true` — Force stop with custom logic
 //!
 //! ## References
 //!
