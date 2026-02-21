@@ -1948,3 +1948,50 @@
 - All 614 tests pass (18 new 1D edge case tests + 596 existing)
 - No regressions
 - All 1D C vs Rust comparisons show bit-identical results for x, minf, and nfev
+
+
+## Iteration 7 — Handle and test edge cases: asymmetric and extreme bounds (2026-02-21)
+
+### What was implemented
+- Created comprehensive edge-case tests for asymmetric and extreme bounds, comparing
+  NLOPT C direct_optimize() with Rust Direct implementation for bit-exact agreement
+- 17 comparison tests covering:
+  - Heavy asymmetry [(-100, 1), (-1, 100)]: sphere with both GABLONSKY and ORIGINAL
+  - Shifted sphere with asymmetric bounds where minimum is inside the domain
+  - Very narrow bounds [(0, 1e-10)]: 1D and mixed 2D with GABLONSKY and ORIGINAL
+  - Very wide bounds [(-1e10, 1e10)]: 1D and 2D with GABLONSKY and ORIGINAL
+  - Positive asymmetric bounds [(2, 10), (0.1, 0.5)] with shifted sphere
+  - Skewed width ratio [(−1e-6, 1e-6), (−1e6, 1e6)]
+  - Near-zero lower bound [(1e-15, 1)] 
+- 4 scaling formula verification tests confirming:
+  - NLOPT scaling xs1=u−l, xs2=l/(u−l) produces correct centers for asymmetric bounds
+  - Narrow bounds [0, 1e-10] don't lose precision in scaling
+  - Wide bounds [-1e10, 1e10] don't overflow in scaling or offset computation
+  - Extreme ratio bounds [(1e-15, 1e-14), (-1e8, 1e8)] roundtrip correctly
+- All comparisons use bit-exact equality (assert_eq!, not approximate tolerance)
+- All tests verify results are finite (no overflow/underflow)
+
+### Files created
+- direct-nlopt-rs/tests/test_asymmetric_extreme_bounds.rs
+
+### Files modified
+- plans/prd-direct-nlopt.json (marked asymmetric/extreme bounds edge cases as passes: true)
+
+### Git commits
+- `ce84998` test(edge-cases): add asymmetric and extreme bounds comparison tests
+
+### Test results
+- 17 C-vs-Rust comparison tests all pass with bit-exact matching
+- 4 scaling verification tests pass
+- No regressions
+- Clippy: only pre-existing warnings, no new issues
+
+### Notes
+- NLOPT C and Rust produce bit-identical results for all tested asymmetric and extreme bound
+  configurations, including x, minf, and nfev
+- The NLOPT scaling formula (xs1=u−l, xs2=l/(u−l)) handles extreme bounds correctly:
+  - Very narrow bounds [0, 1e-10]: xs1=1e-10, xs2=0 — no precision loss
+  - Very wide bounds [-1e10, 1e10]: xs1=2e10, xs2=-0.5 — no overflow
+  - Extreme ratios: all intermediate values remain finite
+- No numerical overflow or underflow detected in any test configuration
+- Both DIRECT_GABLONSKY and DIRECT_ORIGINAL variants handle edge cases identically to NLOPT C
