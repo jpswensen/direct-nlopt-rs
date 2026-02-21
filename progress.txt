@@ -1479,3 +1479,33 @@
 - Both Gablonsky and Original algorithm variants produce identical results to NLOPT C
 - nfev may exceed the specified maxfeval because NLOPT checks after processing a batch of rectangles
 - The monotonicity test confirms the expected behavior: more evaluations → better solutions
+
+
+## Iteration 33 — End-to-End fglobal Termination Comparison (2026-02-21)
+
+### What was implemented
+- Created comprehensive fglobal termination comparison tests between NLOPT C and Rust
+- Tests sphere function with fglobal=0.0 (divfactor=1.0 case) and shifted sphere with fglobal=5.0 (divfactor=|fglobal|=5.0 case)
+- Verified both NLOPT C and Rust terminate at identical iterations with DIRECT_GLOBAL_FOUND / GlobalFound return codes
+- NLOPT C formula: `(minf - fglobal) * 100 / divfactor <= fglper` where fglper = fglobal_reltol * 100
+- Tests cover: both algorithm variants (Gablonsky, Original), loose vs tight tolerances, 2D and 3D, early termination verification
+- All 10 fglobal-specific tests produce IDENTICAL results: same nfev, same x, same minf, same return code
+
+### Files created
+- direct-nlopt-rs/tests/test_fglobal_termination.rs
+
+### Files modified
+- plans/prd-direct-nlopt.json (marked fglobal termination task as passes: true)
+
+### Git commits
+- `54e1e33` test(integration): add end-to-end fglobal termination comparison vs NLOPT C
+
+### Test results
+- 15 tests passed, 0 failed (+10 new fglobal-specific tests, 5 existing nlopt_ffi tests)
+- All comparisons show bit-identical results between C and Rust
+
+### Notes
+- divfactor handling is correctly implemented: divfactor=1.0 when fglobal=0, divfactor=|fglobal| otherwise
+- The sphere center point (0,0) evaluates to exactly 0.0, so fglobal termination triggers immediately after initialization for fglobal=0.0
+- Shifted sphere (fglobal=5.0) requires more iterations to converge, confirming the divfactor scaling works correctly
+- Loose tolerance (fglobal_reltol=1e-2) terminates earlier than tight tolerance (1e-4) as expected
