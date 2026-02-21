@@ -10,11 +10,14 @@
 mod nlopt_ffi;
 
 use std::os::raw::{c_double, c_int, c_void};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use direct_nlopt::direct::Direct;
 use direct_nlopt::trace::TraceWriter;
 use direct_nlopt::types::{DirectAlgorithm, DirectOptions, DIRECT_UNKNOWN_FGLOBAL};
+
+// Serialize all C FFI calls — the NLOPT C code is not thread-safe.
+static C_FFI_MUTEX: Mutex<()> = Mutex::new(());
 
 fn sphere(x: &[f64]) -> f64 {
     x.iter().map(|xi| xi * xi).sum()
@@ -45,6 +48,7 @@ fn run_c_trace(
     magic_eps: f64,
     algmethod: i32,
 ) -> (String, Vec<f64>, f64) {
+    let _lock = C_FFI_MUTEX.lock().unwrap();
     let mut x_out = vec![0.0f64; n];
     let mut minf_out: f64 = 0.0;
     let buf_size = 1024 * 1024; // 1MB buffer
@@ -126,7 +130,6 @@ fn parse_trace_lines(trace: &str) -> Vec<String> {
 /// Normalize exponent format: C uses `e+01`/`e-01`, Rust uses `e1`/`e-1`.
 /// Convert both to a canonical form by stripping leading zeros and unnecessary `+`.
 fn normalize_exponent(s: &str) -> String {
-    use std::fmt::Write;
     let mut result = String::with_capacity(s.len());
     let bytes = s.as_bytes();
     let mut i = 0;

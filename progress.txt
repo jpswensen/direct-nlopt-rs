@@ -2131,3 +2131,26 @@
 - After dirinit_, the linked list is rearranged — must use direct rect indices for init trace
 - For Original algorithm, SELECT j-index uses sequential counter (sel_idx) not array position
 - All floating-point values formatted with 17 significant digits for exact comparison
+
+
+## Iteration 11 — Fix trace comparison test concurrency and mark complete (2026-02-21)
+
+### What was implemented
+- Fixed SIGABRT when trace comparison tests ran concurrently with other C FFI tests
+- Added static Mutex to serialize all C FFI calls in test_trace_comparison.rs
+- Removed unused `use std::fmt::Write` import in test_trace_comparison.rs
+- Updated PRD to mark "Create step-by-step trace comparison" as passes: true
+
+### Files modified
+- direct-nlopt-rs/tests/test_trace_comparison.rs (added C_FFI_MUTEX for thread safety, removed unused import)
+- plans/prd-direct-nlopt.json (marked item 50 as passes: true)
+
+### Git commits
+- `03791c5` fix(tests): serialize trace comparison C FFI calls to prevent SIGABRT
+- No regressions
+- Clippy: only pre-existing warnings, no new issues
+
+### Notes
+- The NLOPT C code is not thread-safe — concurrent calls from different test threads caused SIGABRT
+- Static Mutex ensures only one test calls into C FFI at a time within the trace test binary
+- The existing tests from iteration 10 already verified line-by-line trace equivalence
