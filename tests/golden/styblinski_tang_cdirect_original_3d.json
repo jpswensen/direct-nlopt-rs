@@ -1,0 +1,26 @@
+{
+  "function": "styblinski_tang",
+  "algorithm": "cdirect_original",
+  "dimension": 3,
+  "lower_bounds": [
+    -5.0,
+    -5.0,
+    -5.0
+  ],
+  "upper_bounds": [
+    5.0,
+    5.0,
+    5.0
+  ],
+  "max_feval": 1000,
+  "magic_eps": 0.0001,
+  "x": [
+    -2.9035208047553724,
+    -2.9035208047553724,
+    -2.9080932784636486
+  ],
+  "fun": -117.4981371197098,
+  "nfev": 1000,
+  "nit": 0,
+  "return_code": 5
+}

@@ -1,0 +1,23 @@
+{
+  "function": "rosenbrock",
+  "algorithm": "cdirect_locally_biased",
+  "dimension": 2,
+  "lower_bounds": [
+    -5.0,
+    -5.0
+  ],
+  "upper_bounds": [
+    5.0,
+    5.0
+  ],
+  "max_feval": 2000,
+  "magic_eps": 0.0001,
+  "x": [
+    1.0000000000318652,
+    1.0000000000672724
+  ],
+  "fun": 2.2700052589269615e-21,
+  "nfev": 2000,
+  "nit": 0,
+  "return_code": 5
+}

@@ -1,0 +1,23 @@
+{
+  "function": "styblinski_tang",
+  "algorithm": "gablonsky_original",
+  "dimension": 2,
+  "lower_bounds": [
+    -5.0,
+    -5.0
+  ],
+  "upper_bounds": [
+    5.0,
+    5.0
+  ],
+  "max_feval": 1000,
+  "magic_eps": 0.0001,
+  "x": [
+    -2.9035208047553724,
+    -2.9035208047553724
+  ],
+  "fun": -78.33233140149608,
+  "nfev": 0,
+  "nit": 0,
+  "return_code": 1
+}

@@ -1,0 +1,23 @@
+{
+  "function": "rosenbrock",
+  "algorithm": "gablonsky_original",
+  "dimension": 2,
+  "lower_bounds": [
+    -5.0,
+    -5.0
+  ],
+  "upper_bounds": [
+    5.0,
+    5.0
+  ],
+  "max_feval": 2000,
+  "magic_eps": 0.0001,
+  "x": [
+    0.9899123326954449,
+    0.9798641805957775
+  ],
+  "fun": 0.0001021484859422904,
+  "nfev": 0,
+  "nit": 0,
+  "return_code": 1
+}

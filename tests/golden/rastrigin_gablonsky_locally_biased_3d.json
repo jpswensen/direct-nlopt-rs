@@ -1,0 +1,26 @@
+{
+  "function": "rastrigin",
+  "algorithm": "gablonsky_locally_biased",
+  "dimension": 3,
+  "lower_bounds": [
+    -5.12,
+    -5.12,
+    -5.12
+  ],
+  "upper_bounds": [
+    5.12,
+    5.12,
+    5.12
+  ],
+  "max_feval": 2000,
+  "magic_eps": 0.0001,
+  "x": [
+    0.0,
+    0.0,
+    0.0
+  ],
+  "fun": 0.0,
+  "nfev": 0,
+  "nit": 0,
+  "return_code": 1
+}
