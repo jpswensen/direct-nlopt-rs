@@ -1590,3 +1590,42 @@
 - C initialization (dirinit_) checks force_stop after center eval; Rust initialize() does not — shifted sphere sidesteps this difference
 - Callback fires after processing all selected rectangles per main-loop iteration, while objective force_stop fires mid-batch during evaluate_sample_points
 - The nfev difference is documented and expected: Rust increments nfev for skipped evals (line 593 of direct.rs), C does not call dirinfcn_ for skipped evals
+
+
+## Iteration 36 — End-to-End Higher-Dimensional Problems (5D, 10D, 20D) Comparison (2026-02-21)
+
+### What was implemented
+- Created end-to-end comparison tests for sphere function in 5D, 10D, and 20D
+- Tests compare NLOPT C direct_optimize() with Rust Direct implementation using maxfeval=5000
+- Both DIRECT_GABLONSKY and DIRECT_ORIGINAL variants tested at each dimension
+- Additional stress tests with maxfeval=10000 for 5D and 10D
+- All results are BIT-IDENTICAL between C and Rust: x, minf, nfev match exactly
+- Key results:
+  - 5D Gablonsky: nfev=5017, minf=0.0 (both C and Rust)
+  - 5D Original: nfev=5459, minf=0.0
+  - 10D Gablonsky: nfev=5035, minf=0.0
+  - 10D Original: nfev=7469, minf=0.0
+  - 20D Gablonsky: nfev=5149, minf=0.0
+  - 20D Original: nfev=7057, minf=0.0
+- Original algorithm evaluates many more functions per iteration (divides all longest dims)
+- Also fixed PRD item 35 (force_stop) which was already implemented but not marked passes: true
+
+### Files created
+- direct-nlopt-rs/tests/test_highdim_comparison.rs (9 new tests)
+
+### Files modified
+- plans/prd-direct-nlopt.json (marked items 35 and 36 as passes: true)
+
+### Git commits
+- See below
+
+### Test results
+- 9 new highdim tests passed, 0 failed
+- Full suite: all tests pass (no regressions)
+- Total tests across all test binaries: 500+
+
+### Notes
+- Memory allocation and level management work correctly at 20D (41 initial evals = 2*20+1)
+- Sphere centered at origin trivially finds minf=0.0 in all dimensions
+- The Original algorithm's nfev exceeds maxfeval more than Gablonsky due to batch processing
+- Higher dimensions stress-test the thirds/levels precomputation and linked list management
