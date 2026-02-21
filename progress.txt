@@ -1024,3 +1024,25 @@
 - NLOPT C uses Fortran-translated indexing: `--arrayi` pointer adjustment for 1-based writes, column-major length layout with `length -= (1 + n)` offset
 - Rust implementation uses 0-based internal storage but returns 1-based dimension indices (matching NLOPT convention)
 - Both implementations find minimum length index first, then collect all dimensions with that minimum — identical logic
+
+## Iteration 21 — Comparative Unit Tests for Linked List Operations (dirinitlist_, dirinsertlist_) (2026-02-21)
+
+### What was implemented
+- Created `tests/test_linked_list_compare.rs` with 10 comparative tests calling both NLOPT C FFI and Rust implementations
+- Tests cover: init_lists, sorted insertion at same level, insertion at different depths, removal, ascending order walk, dirinit-style insertion, jones=0 level computation, 3D insertion, equal f-value tie-breaking, and large batch stress test
+- Created CStorage helper struct that mirrors NLOPT's C memory layout with 1-based indexing via pointer adjustment conventions
+- FFI bindings for direct_dirinitlist_(), direct_dirinsertlist_(), and direct_dirgetlevel_()
+
+### PRD item completed
+- "Create comparative unit tests for linked list operations (dirinitlist_, dirinsertlist_)" → passes: true
+
+### Test results
+- All 10 new linked list comparative tests pass
+- Full test suite: 188 unit tests + all integration tests pass, no regressions
+- Clippy: no new warnings
+
+### Notes
+- NLOPT C uses `--point` adjustment giving maxfunc usable slots (1..maxfunc), while Rust uses maxfunc-1 slots (1..maxfunc-1) — a 1-slot difference that is algorithmically negligible
+- init_lists test compares behavioral equivalence (valid free chain structure) rather than bit-exact raw memory
+- C `direct_dirinsertlist_()` uses `f -= 3` (Fortran 1-based column offset), `--point`, `++anchor`, `length -= (1 + n)` pointer adjustments
+- CStorage helper provides `set_f(idx, val, flag)`, `get_point()`, `set_point()`, `get_anchor()`, `alloc_rect()`, `walk_list()` methods mapping between 1-based C conventions and raw 0-based arrays
