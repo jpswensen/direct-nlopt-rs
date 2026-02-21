@@ -698,6 +698,39 @@ impl RectangleStorage {
         self.anchor[anchor_idx] = self.point[idx];
         self.point[idx] = 0;
     }
+
+    /// Remove a rectangle from its anchor linked list at a given depth.
+    ///
+    /// Unlike `remove_from_anchor()` which only removes the head, this method
+    /// can remove from any position in the list by walking to find the predecessor.
+    ///
+    /// Matches the removal code in DIRect.c main loop (lines 546-554):
+    /// ```c
+    /// if (! (anchor[actdeep + 1] == help)) {
+    ///     pos1 = anchor[actdeep + 1];
+    ///     while(! (point[pos1 - 1] == help)) {
+    ///         pos1 = point[pos1 - 1];
+    ///     }
+    ///     point[pos1 - 1] = point[help - 1];
+    /// } else {
+    ///     anchor[actdeep + 1] = point[help - 1];
+    /// }
+    /// ```
+    pub fn remove_from_list_at_depth(&mut self, idx: usize, depth: i32) {
+        let anchor_idx = (depth + 1) as usize;
+        if self.anchor[anchor_idx] == idx as i32 {
+            // idx is the head
+            self.anchor[anchor_idx] = self.point[idx];
+        } else {
+            // Walk the list to find predecessor
+            let mut pos1 = self.anchor[anchor_idx] as usize;
+            while self.point[pos1] != idx as i32 {
+                pos1 = self.point[pos1] as usize;
+            }
+            self.point[pos1] = self.point[idx];
+        }
+        self.point[idx] = 0;
+    }
 }
 
 // ════════════════════════════════════════════════════════════════════════

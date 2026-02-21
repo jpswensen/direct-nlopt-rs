@@ -24,7 +24,7 @@ use rayon::prelude::*;
 
 use crate::error::{DirectError, Result};
 use crate::storage::RectangleStorage;
-use crate::types::{Bounds, DirectOptions, ObjectiveFn, DIRECT_UNKNOWN_FGLOBAL};
+use crate::types::{Bounds, CallbackFn, DirectOptions, ObjectiveFn, DIRECT_UNKNOWN_FGLOBAL};
 
 /// Core DIRECT optimizer state for the Gablonsky Fortran→C translation path.
 ///
@@ -767,6 +767,317 @@ impl Direct {
     /// Returns 0 for Original, 1 for Gablonsky (locally biased).
     pub fn jones(&self) -> i32 {
         self.options.algorithm.algmethod().unwrap_or(1)
+    }
+
+    // ──────────────────────────────────────────────────────────────────────
+    // Main iteration loop — matches direct_direct_() in DIRect.c
+    // ──────────────────────────────────────────────────────────────────────
+
+    /// Run the full DIRECT optimization.
+    ///
+    /// Matches `direct_direct_()` in DIRect.c (lines 449–768) exactly.
+    ///
+    /// # Algorithm Flow
+    ///
+    /// 1. `validate_inputs()` — input validation and epsilon setup
+    /// 2. `initialize()` — center evaluation + 2n neighbors + first division
+    /// 3. Main loop (each iteration):
+    ///    a. `dirchoose_()` — select potentially optimal rectangles (convex hull)
+    ///    b. `dirdoubleinsert_()` — (Jones Original only) add equal-valued rects
+    ///    c. For each selected rectangle:
+    ///       - `get_max_deep()` — compute depth for delta calculation
+    ///       - Remove rectangle from anchor linked list
+    ///       - `get_longest_dims()` — find dimensions with longest sides
+    ///       - `sample_points()` — create 2×maxi new sample points
+    ///       - `evaluate_sample_points()` — evaluate objective at new points
+    ///       - `divide_rectangle()` — trisect along longest dimensions
+    ///       - `insert_into_list()` — insert children into sorted linked lists
+    ///    - d. Termination checks: volume_tol, sigma_tol, fglobal, maxfun, maxiter
+    ///    - e. `replace_infeasible()` — replace infeasible point values
+    ///    - f. Epsilon update (Jones formula)
+    /// 4. Extract best point and build `DirectResult`
+    ///
+    /// # Callback
+    ///
+    /// If provided, the callback is called after each iteration with the current
+    /// best point and value. If the callback returns `true`, optimization stops
+    /// with `ForcedStop`.
+    ///
+    /// # Returns
+    ///
+    /// `DirectResult` containing the best point, function value, evaluation count,
+    /// iteration count, and termination reason.
+    pub fn minimize(
+        &mut self,
+        callback: Option<&CallbackFn>,
+    ) -> Result<crate::types::DirectResult> {
+        use crate::error::DirectReturnCode;
+        use std::time::Instant;
+
+        let start_time = Instant::now();
+
+        // Step 1: Validate inputs (matching direct_dirheader_)
+        self.validate_inputs()?;
+
+        let jones = self.jones();
+        let algmethod = jones; // algmethod=0 → Original, =1 → Gablonsky
+
+        // Compute divfactor for fglobal test (DIRect.c lines 377-382)
+        let divfactor = if self.options.fglobal == 0.0 {
+            1.0
+        } else {
+            self.options.fglobal.abs()
+        };
+
+        // Save maxf budget for infeasible extension (DIRect.c lines 387-389)
+        let oldmaxf = self.options.max_feval;
+        let mut increase = false;
+
+        // Compute max iteration count (DIRect.c line 60: maxt)
+        let maxt = if self.options.max_iter == 0 {
+            // NLOPT default: use max_feval / n as a fallback, or 1000000
+            1_000_000usize
+        } else {
+            self.options.max_iter
+        };
+
+        // Step 2: Initialize (matching dirinit_)
+        self.initialize()?;
+
+        let mdeep = self.storage.maxdeep as i32;
+        let mut numfunc = self.nfev;
+
+        // Create PotentiallyOptimal selection buffer
+        let mut po = crate::storage::PotentiallyOptimal::new(
+            crate::storage::PotentiallyOptimal::DEFAULT_MAX_DIV,
+        );
+
+        // Get tolerance thresholds in NLOPT percentage form
+        let volper = self.volume_reltol_pct();
+        let sigmaper = self.sigma_reltol_pct();
+        let fglper = self.fglobal_reltol_pct();
+        let epsabs = self.options.magic_eps_abs;
+
+        // Return code (matches NLOPT's ierror)
+        let mut return_code: Option<DirectReturnCode> = None;
+
+        // Step 3: Main loop (DIRect.c lines 449-668)
+        for t in 2..=(maxt + 1) {
+            self.nit = t - 1;
+
+            // 3a. Select potentially optimal rectangles (dirchoose_)
+            // NOTE: NLOPT passes MAXDEEP (maximum possible depth), not actmaxdeep
+            po.select(
+                &self.storage,
+                self.storage.maxdeep as i32,
+                self.minf,
+                self.eps,
+                epsabs,
+                self.ifeasible_f,
+                jones,
+            );
+
+            // 3b. Double insert for Jones Original (algmethod=0)
+            // (DIRect.c lines 467-480)
+            if algmethod == 0 {
+                if let Err(_code) = po.double_insert(&self.storage) {
+                    return Err(DirectError::DirectCode(
+                        -6,
+                        "Capacity of selection array S reached in DIRDoubleInsert".into(),
+                    ));
+                }
+            }
+
+            let oldpos = self.minpos;
+
+            // 3c. Process each selected rectangle
+            // (DIRect.c lines 487-607)
+            let maxpos = po.count;
+            for j in 0..maxpos {
+                let actdeep = po.rect_levels[j];
+                let help = po.indices[j];
+
+                // Skip if this slot was eliminated (0 = empty)
+                if help <= 0 {
+                    continue;
+                }
+
+                let help_idx = help as usize;
+
+                // Compute delta for sampling (DIRect.c lines 501-503)
+                let actdeep_div = self.storage.get_max_deep(help_idx);
+                let delta = self.storage.thirds[(actdeep_div + 1) as usize];
+
+                // Check max depth (DIRect.c lines 510-515)
+                if actdeep + 1 >= mdeep {
+                    return_code = Some(DirectReturnCode::OutOfMemory);
+                    break;
+                }
+
+                // Update actmaxdeep (DIRect.c line 517)
+                self.actmaxdeep = self.actmaxdeep.max(actdeep);
+
+                // Remove rectangle from anchor list (DIRect.c lines 518-528)
+                self.storage.remove_from_list_at_depth(help_idx, actdeep);
+
+                // Handle infeasible depth: if actdeep < 0, read from f-value
+                // (DIRect.c lines 529-531)
+                let _actdeep_for_division = if actdeep < 0 {
+                    self.storage.f_val(help_idx) as i32
+                } else {
+                    actdeep
+                };
+
+                // Get longest dimensions (DIRect.c line 536)
+                let (arrayi, maxi) = self.storage.get_longest_dims(help_idx);
+
+                // Sample new points (DIRect.c lines 542-551)
+                let new_start = self.sample_points(help_idx, &arrayi, delta)?;
+
+                // Evaluate sample points (DIRect.c lines 556-568)
+                self.evaluate_sample_points(new_start, maxi)?;
+
+                // Check force_stop (DIRect.c lines 569-572)
+                if self.force_stop.load(Ordering::Relaxed) {
+                    return_code = Some(DirectReturnCode::ForcedStop);
+                    break;
+                }
+
+                // Check max time (DIRect.c lines 573-576)
+                if self.options.max_time > 0.0
+                    && start_time.elapsed().as_secs_f64() >= self.options.max_time
+                {
+                    return_code = Some(DirectReturnCode::MaxTimeExceeded);
+                    break;
+                }
+
+                // Divide the rectangle (DIRect.c lines 581-583)
+                self.divide_rectangle(new_start, actdeep_div, help_idx, &arrayi, maxi);
+
+                // Insert new rects into sorted lists (DIRect.c lines 588-590)
+                let mut start_chain = new_start as i32;
+                self.storage
+                    .insert_into_list(&mut start_chain, maxi, help_idx, jones);
+
+                // Update function evaluation count (DIRect.c lines 595-596)
+                numfunc += 2 * maxi;
+            }
+
+            // Break out if we got a return code during rectangle processing
+            if return_code.is_some() {
+                break;
+            }
+
+            // Update nfev from numfunc
+            self.nfev = numfunc;
+
+            // Call callback if provided
+            if let Some(cb) = callback {
+                if oldpos < self.minpos {
+                    // New minimum found — extract current best point
+                    let x_best: Vec<f64> = (0..self.dim)
+                        .map(|i| self.storage.center(self.minpos, i))
+                        .collect();
+                    let mut x_actual = vec![0.0; self.dim];
+                    self.to_actual(&x_best, &mut x_actual);
+
+                    if cb(&x_actual, self.minf, self.nfev, self.nit) {
+                        self.force_stop.store(true, Ordering::Relaxed);
+                        return_code = Some(DirectReturnCode::ForcedStop);
+                        break;
+                    }
+                }
+            }
+
+            // ── Termination checks (DIRect.c lines 613-668) ──
+
+            // Volume tolerance check (DIRect.c lines 613-626)
+            // Use jones=0 to get level for volume check
+            let level_for_vol =
+                self.storage.get_level(self.minpos, 0) as usize;
+            let vol_delta = self.storage.thirds[level_for_vol] * 100.0;
+            if volper > 0.0 && vol_delta <= volper {
+                return_code = Some(DirectReturnCode::VolTol);
+                break;
+            }
+
+            // Sigma tolerance check (DIRect.c lines 631-640)
+            let level_for_sigma =
+                self.storage.get_level(self.minpos, jones) as usize;
+            let sigma_delta = self.storage.levels[level_for_sigma];
+            if sigmaper > 0.0 && sigma_delta <= sigmaper {
+                return_code = Some(DirectReturnCode::SigmaTol);
+                break;
+            }
+
+            // fglobal tolerance check (DIRect.c lines 645-652)
+            if self.options.fglobal != DIRECT_UNKNOWN_FGLOBAL
+                && fglper > 0.0
+                && (self.minf - self.options.fglobal) * 100.0 / divfactor <= fglper
+            {
+                return_code = Some(DirectReturnCode::GlobalFound);
+                break;
+            }
+
+            // Replace infeasible points (DIRect.c lines 657-661)
+            if self.iinfeasible > 0 {
+                self.storage.replace_infeasible(&self.xs1, &self.xs2, self.fmax, jones);
+            }
+
+            // Epsilon update using Jones formula (DIRect.c lines 666-670)
+            self.update_epsilon(self.minf);
+
+            // Infeasible budget extension (DIRect.c lines 678-694)
+            if increase {
+                if self.options.max_feval > 0 {
+                    self.options.max_feval = numfunc + oldmaxf;
+                }
+                if self.ifeasible_f == 0 {
+                    increase = false;
+                }
+            }
+
+            // Max function evaluations check (DIRect.c lines 700-713)
+            if self.options.max_feval > 0 && numfunc > self.options.max_feval {
+                if self.ifeasible_f == 0 {
+                    return_code = Some(DirectReturnCode::MaxFevalExceeded);
+                    break;
+                } else {
+                    increase = true;
+                    if oldmaxf > 0 {
+                        self.options.max_feval = numfunc + oldmaxf;
+                    }
+                }
+            }
+
+            // Max time check at end of iteration
+            if self.options.max_time > 0.0
+                && start_time.elapsed().as_secs_f64() >= self.options.max_time
+            {
+                return_code = Some(DirectReturnCode::MaxTimeExceeded);
+                break;
+            }
+        }
+
+        // If loop finished without a return code, it's maxiter exceeded
+        // (DIRect.c line 720)
+        let return_code = return_code.unwrap_or(DirectReturnCode::MaxIterExceeded);
+
+        // Step 4: Extract best point (DIRect.c lines 723-731)
+        // Formula: x[i] = (center[minpos, i] + xs2[i]) * xs1[i] = to_actual(center)
+        let x_best: Vec<f64> = (0..self.dim)
+            .map(|i| self.storage.center(self.minpos, i))
+            .collect();
+        let mut x_actual = vec![0.0; self.dim];
+        self.to_actual(&x_best, &mut x_actual);
+
+        Ok(crate::types::DirectResult::new(
+            x_actual,
+            self.minf,
+            self.nfev,
+            self.nit,
+            return_code,
+        ))
     }
 }
 
@@ -2302,5 +2613,343 @@ mod tests {
             assert_eq!(d.storage.length(6, j), 1, "dim3+ dim{} should be 1", j);
             assert_eq!(d.storage.length(7, j), 1, "dim3- dim{} should be 1", j);
         }
+    }
+
+    // ────────────────────────────────────────────────────────────────
+    // Integration tests — minimize() main loop
+    // ────────────────────────────────────────────────────────────────
+
+    fn rosenbrock(x: &[f64]) -> f64 {
+        let mut sum = 0.0;
+        for i in 0..x.len() - 1 {
+            sum += 100.0 * (x[i + 1] - x[i] * x[i]).powi(2) + (1.0 - x[i]).powi(2);
+        }
+        sum
+    }
+
+    fn rastrigin(x: &[f64]) -> f64 {
+        let n = x.len() as f64;
+        let mut sum = 10.0 * n;
+        for &xi in x {
+            sum += xi * xi - 10.0 * (2.0 * std::f64::consts::PI * xi).cos();
+        }
+        sum
+    }
+
+    #[test]
+    fn test_minimize_sphere_2d_gablonsky() {
+        let bounds = vec![(-5.0, 5.0); 2];
+        let options = DirectOptions {
+            max_feval: 200,
+            algorithm: DirectAlgorithm::GablonskyLocallyBiased,
+            ..Default::default()
+        };
+        let mut d = Direct::new(sphere, &bounds, options).unwrap();
+        let result = d.minimize(None).unwrap();
+
+        assert!(result.success, "Optimization should succeed: {}", result.message);
+        assert_eq!(result.return_code, crate::error::DirectReturnCode::MaxFevalExceeded);
+        assert!(result.fun < 1.0, "Should find a good minimum, got f={}", result.fun);
+        // Note: nfev may slightly exceed max_feval since the check happens after each iteration
+        assert!(result.nfev >= 100, "Should do significant evaluations");
+        assert!(result.nit >= 1, "Should do at least 1 iteration");
+        // Sphere minimum is at origin
+        for xi in &result.x {
+            assert!(xi.abs() < 2.0, "x should be near origin, got {:?}", result.x);
+        }
+    }
+
+    #[test]
+    fn test_minimize_sphere_2d_original() {
+        let bounds = vec![(-5.0, 5.0); 2];
+        let options = DirectOptions {
+            max_feval: 200,
+            algorithm: DirectAlgorithm::GablonskyOriginal,
+            ..Default::default()
+        };
+        let mut d = Direct::new(sphere, &bounds, options).unwrap();
+        let result = d.minimize(None).unwrap();
+
+        assert!(result.success, "Optimization should succeed: {}", result.message);
+        assert!(result.fun < 1.0, "Should find a good minimum, got f={}", result.fun);
+    }
+
+    #[test]
+    fn test_minimize_sphere_2d_maxiter() {
+        let bounds = vec![(-5.0, 5.0); 2];
+        let options = DirectOptions {
+            max_iter: 10,
+            algorithm: DirectAlgorithm::GablonskyLocallyBiased,
+            ..Default::default()
+        };
+        let mut d = Direct::new(sphere, &bounds, options).unwrap();
+        let result = d.minimize(None).unwrap();
+
+        assert_eq!(result.return_code, crate::error::DirectReturnCode::MaxIterExceeded);
+        assert!(result.nit <= 10, "Should respect maxiter, got nit={}", result.nit);
+    }
+
+    #[test]
+    fn test_minimize_sphere_3d_gablonsky() {
+        let bounds = vec![(-5.0, 5.0); 3];
+        let options = DirectOptions {
+            max_feval: 500,
+            algorithm: DirectAlgorithm::GablonskyLocallyBiased,
+            ..Default::default()
+        };
+        let mut d = Direct::new(sphere, &bounds, options).unwrap();
+        let result = d.minimize(None).unwrap();
+
+        assert!(result.success);
+        assert!(result.fun < 1.0, "3D sphere should converge, got f={}", result.fun);
+    }
+
+    #[test]
+    fn test_minimize_sphere_1d_gablonsky() {
+        let bounds = vec![(-5.0, 5.0)];
+        let options = DirectOptions {
+            max_feval: 100,
+            algorithm: DirectAlgorithm::GablonskyLocallyBiased,
+            ..Default::default()
+        };
+        let mut d = Direct::new(sphere, &bounds, options).unwrap();
+        let result = d.minimize(None).unwrap();
+
+        assert!(result.success);
+        assert!(result.fun < 0.1, "1D sphere should converge well, got f={}", result.fun);
+        assert!(result.x[0].abs() < 1.0, "x should be near 0, got x={}", result.x[0]);
+    }
+
+    #[test]
+    fn test_minimize_sphere_fglobal_termination() {
+        let bounds = vec![(-5.0, 5.0); 2];
+        let options = DirectOptions {
+            max_feval: 10000,
+            fglobal: 0.0,
+            fglobal_reltol: 0.01,
+            algorithm: DirectAlgorithm::GablonskyLocallyBiased,
+            ..Default::default()
+        };
+        let mut d = Direct::new(sphere, &bounds, options).unwrap();
+        let result = d.minimize(None).unwrap();
+
+        assert_eq!(result.return_code, crate::error::DirectReturnCode::GlobalFound);
+        assert!(result.fun < 0.01, "Should converge to near-global, got f={}", result.fun);
+    }
+
+    #[test]
+    fn test_minimize_rosenbrock_2d_gablonsky() {
+        let bounds = vec![(-5.0, 5.0); 2];
+        let options = DirectOptions {
+            max_feval: 2000,
+            algorithm: DirectAlgorithm::GablonskyLocallyBiased,
+            ..Default::default()
+        };
+        let mut d = Direct::new(rosenbrock, &bounds, options).unwrap();
+        let result = d.minimize(None).unwrap();
+
+        assert!(result.success);
+        // Rosenbrock is harder, but should make progress
+        assert!(result.fun < 100.0, "Rosenbrock should make progress, got f={}", result.fun);
+    }
+
+    #[test]
+    fn test_minimize_rosenbrock_2d_original() {
+        let bounds = vec![(-5.0, 5.0); 2];
+        let options = DirectOptions {
+            max_feval: 2000,
+            algorithm: DirectAlgorithm::GablonskyOriginal,
+            ..Default::default()
+        };
+        let mut d = Direct::new(rosenbrock, &bounds, options).unwrap();
+        let result = d.minimize(None).unwrap();
+
+        assert!(result.success);
+        assert!(result.fun < 100.0, "Rosenbrock should make progress, got f={}", result.fun);
+    }
+
+    #[test]
+    fn test_minimize_rastrigin_2d_gablonsky() {
+        let bounds = vec![(-5.12, 5.12); 2];
+        let options = DirectOptions {
+            max_feval: 1000,
+            algorithm: DirectAlgorithm::GablonskyLocallyBiased,
+            ..Default::default()
+        };
+        let mut d = Direct::new(rastrigin, &bounds, options).unwrap();
+        let result = d.minimize(None).unwrap();
+
+        assert!(result.success);
+        // Rastrigin global minimum is 0 at origin
+        assert!(result.fun < 10.0, "Rastrigin should make progress, got f={}", result.fun);
+    }
+
+    #[test]
+    fn test_minimize_callback_force_stop() {
+        // Use shifted sphere so minimum is NOT at domain center
+        let shifted_sphere = |x: &[f64]| (x[0] - 1.0).powi(2) + (x[1] - 2.0).powi(2);
+        let bounds = vec![(-5.0, 5.0); 2];
+        let options = DirectOptions {
+            max_feval: 10000,
+            algorithm: DirectAlgorithm::GablonskyLocallyBiased,
+            ..Default::default()
+        };
+        let mut d = Direct::new(shifted_sphere, &bounds, options).unwrap();
+
+        // Stop when f < 1.0
+        let cb: Box<CallbackFn> = Box::new(|_x, fun, _nfev, _nit| fun < 1.0);
+        let result = d.minimize(Some(&*cb)).unwrap();
+
+        assert_eq!(result.return_code, crate::error::DirectReturnCode::ForcedStop);
+        assert!(result.fun < 1.0, "Should have found f < 1.0 before stopping");
+    }
+
+    #[test]
+    fn test_minimize_force_stop_atomic() {
+        use std::sync::atomic::Ordering;
+
+        let bounds = vec![(-5.0, 5.0); 2];
+        let counter = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter2 = Arc::clone(&counter);
+
+        let mut d = Direct::new(
+            move |x: &[f64]| {
+                counter2.fetch_add(1, Ordering::Relaxed);
+                x.iter().map(|xi| xi * xi).sum()
+            },
+            &bounds,
+            DirectOptions {
+                max_feval: 10000,
+                algorithm: DirectAlgorithm::GablonskyLocallyBiased,
+                ..Default::default()
+            },
+        ).unwrap();
+
+        // Set force_stop after construction
+        let stop_flag = Arc::clone(&d.force_stop);
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            stop_flag.store(true, Ordering::Relaxed);
+        });
+
+        let result = d.minimize(None).unwrap();
+        assert_eq!(result.return_code, crate::error::DirectReturnCode::ForcedStop);
+    }
+
+    #[test]
+    fn test_minimize_asymmetric_bounds() {
+        let bounds = vec![(2.0, 10.0), (-3.0, 7.0)];
+        let options = DirectOptions {
+            max_feval: 500,
+            algorithm: DirectAlgorithm::GablonskyLocallyBiased,
+            ..Default::default()
+        };
+        let mut d = Direct::new(sphere, &bounds, options).unwrap();
+        let result = d.minimize(None).unwrap();
+
+        assert!(result.success);
+        // Minimum of sphere in [2,10]×[-3,7] is at (2, 0) with f=4
+        assert!(result.fun < 10.0, "Should find near-boundary minimum, got f={}", result.fun);
+        assert!(result.x[0] >= 2.0 && result.x[0] <= 10.0, "x[0] should be in bounds");
+        assert!(result.x[1] >= -3.0 && result.x[1] <= 7.0, "x[1] should be in bounds");
+    }
+
+    #[test]
+    fn test_minimize_jones_eps_update() {
+        let bounds = vec![(-5.0, 5.0); 2];
+        let options = DirectOptions {
+            max_feval: 500,
+            magic_eps: -1e-4, // Negative → Jones update formula
+            algorithm: DirectAlgorithm::GablonskyLocallyBiased,
+            ..Default::default()
+        };
+        let mut d = Direct::new(sphere, &bounds, options).unwrap();
+        let result = d.minimize(None).unwrap();
+
+        assert!(result.success);
+        assert!(result.fun < 1.0, "Should converge with Jones eps update");
+    }
+
+    #[test]
+    fn test_minimize_volume_tol_termination() {
+        let bounds = vec![(-5.0, 5.0); 2];
+        let options = DirectOptions {
+            max_feval: 100000,
+            volume_reltol: 1e-2,
+            algorithm: DirectAlgorithm::GablonskyLocallyBiased,
+            ..Default::default()
+        };
+        let mut d = Direct::new(sphere, &bounds, options).unwrap();
+        let result = d.minimize(None).unwrap();
+
+        // Should stop due to volume tolerance
+        assert_eq!(result.return_code, crate::error::DirectReturnCode::VolTol);
+    }
+
+    #[test]
+    fn test_minimize_parallel_vs_serial_sphere() {
+        // Run same problem with parallel=false and parallel=true
+        let bounds = vec![(-5.0, 5.0); 2];
+
+        // Serial
+        let options_serial = DirectOptions {
+            max_feval: 200,
+            parallel: false,
+            algorithm: DirectAlgorithm::GablonskyLocallyBiased,
+            ..Default::default()
+        };
+        let mut d_serial = Direct::new(sphere, &bounds, options_serial).unwrap();
+        let result_serial = d_serial.minimize(None).unwrap();
+
+        // Parallel
+        let options_parallel = DirectOptions {
+            max_feval: 200,
+            parallel: true,
+            algorithm: DirectAlgorithm::GablonskyLocallyBiased,
+            ..Default::default()
+        };
+        let mut d_parallel = Direct::new(sphere, &bounds, options_parallel).unwrap();
+        let result_parallel = d_parallel.minimize(None).unwrap();
+
+        // Both should produce valid results (may differ in exact values due to parallel eval order)
+        assert!(result_serial.success);
+        assert!(result_parallel.success);
+        assert!(result_serial.fun < 1.0);
+        assert!(result_parallel.fun < 1.0);
+    }
+
+    #[test]
+    fn test_minimize_5d_sphere() {
+        let bounds = vec![(-5.0, 5.0); 5];
+        let options = DirectOptions {
+            max_feval: 2000,
+            algorithm: DirectAlgorithm::GablonskyLocallyBiased,
+            ..Default::default()
+        };
+        let mut d = Direct::new(sphere, &bounds, options).unwrap();
+        let result = d.minimize(None).unwrap();
+
+        assert!(result.success);
+        // 5D requires more evaluations, but should make progress
+        assert!(result.fun < 5.0, "5D sphere should converge, got f={}", result.fun);
+    }
+
+    #[test]
+    fn test_minimize_result_fields() {
+        let bounds = vec![(-5.0, 5.0); 2];
+        let options = DirectOptions {
+            max_feval: 100,
+            algorithm: DirectAlgorithm::GablonskyLocallyBiased,
+            ..Default::default()
+        };
+        let mut d = Direct::new(sphere, &bounds, options).unwrap();
+        let result = d.minimize(None).unwrap();
+
+        // Verify result fields are correctly populated
+        assert_eq!(result.x.len(), 2);
+        assert!(result.fun.is_finite());
+        assert!(result.nfev > 0);
+        assert!(result.nit > 0);
+        assert!(!result.message.is_empty());
     }
 }

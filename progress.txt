@@ -628,3 +628,66 @@
 ### Notes
 - The incremental length propagation pattern means: children of the last-divided dimension (largest w) get ALL dimensions' lengths incremented (becoming cubes), while children of the first-divided dimension only get their own dimension incremented (remaining elongated)
 - This is the expected DIRECT behavior: trisecting along the dimension with best improvement first ensures the search focuses on promising directions
+
+
+## Iteration 12 — Implement Main Iteration Loop (Direct::minimize()) (2026-02-21)
+
+### What was implemented
+- Implemented `Direct::minimize()` method matching `direct_direct_()` in DIRect.c (lines 449-768)
+- The main loop follows NLOPT's exact flow:
+  1. `validate_inputs()` → epsilon handling, bound checks
+  2. `initialize()` → center + 2n neighbors + first division
+  3. Main iteration loop:
+     - `PotentiallyOptimal::select()` (dirchoose_) → convex hull rectangle selection
+     - `PotentiallyOptimal::double_insert()` (dirdoubleinsert_) for Jones Original (algmethod=0)
+     - For each selected rectangle:
+       - `get_max_deep()` for delta calculation
+       - `remove_from_list_at_depth()` for general linked list removal (new method)
+       - `get_longest_dims()`, `sample_points()`, `evaluate_sample_points()`
+       - `divide_rectangle()`, `insert_into_list()`
+     - Termination checks: volume_tol, sigma_tol, fglobal, maxfeval, maxiter, maxtime
+     - `replace_infeasible()` after processing
+     - Epsilon update via Jones formula
+  4. Best point extraction via `to_actual(center[minpos])`
+- Added `RectangleStorage::remove_from_list_at_depth()` for general linked list removal
+  (the existing `remove_from_anchor()` only handled head removal; the main loop needs
+  to remove non-head rects when using `dirdoubleinsert_` with Jones Original)
+- Key fix: `po.select()` must receive `storage.maxdeep` (MAXDEEP constant) as the sweep
+  limit, NOT `actmaxdeep` — matching DIRect.c line 455 which passes `&MAXDEEP`
+- Callback support: called when a new minimum is found (`oldpos < minpos`), returns true
+  to trigger force_stop
+- Infeasible budget extension: when no feasible point found, budget is automatically extended
+  (DIRect.c lines 678-713)
+- Force-stop mechanism: atomic flag checked during evaluation and between iterations
+
+### Files modified
+- direct-nlopt-rs/src/direct.rs (added minimize() method with ~250 lines + 17 integration tests)
+- direct-nlopt-rs/src/storage.rs (added remove_from_list_at_depth() method)
+- plans/prd-direct-nlopt.json (marked main iteration loop as passes: true)
+
+### Git commits
+- (pending)
+
+### Test results
+- 137 tests passed, 0 failed (+17 new integration tests)
+- New tests cover:
+  - Sphere 1D/2D/3D/5D with GablonskyLocallyBiased
+  - Sphere 2D with GablonskyOriginal (Jones, uses dirdoubleinsert_)
+  - Rosenbrock 2D with both algorithm variants
+  - Rastrigin 2D (multimodal)
+  - MaxIter termination, MaxFeval termination, fglobal termination, VolTol termination
+  - Callback force_stop, atomic force_stop
+  - Asymmetric bounds, Jones epsilon update
+  - Parallel vs serial comparison
+  - Result field validation
+- cargo clippy clean
+
+### Notes
+- The `po.select()` sweep limit was initially `actmaxdeep` which caused infinite loops
+  because rects at deeper levels were never found. Fixed to use `storage.maxdeep` (MAXDEEP)
+  matching the NLOPT C call in DIRect.c line 455
+- The callback only fires when `oldpos < minpos` (new minimum found). For functions with
+  minimum at the domain center (like sphere), the center evaluation during init finds f=0
+  immediately, so minpos never changes and the callback never fires
+- `nfev` may slightly exceed `max_feval` because the termination check happens at the end
+  of each iteration, after all selected rects have been processed — this matches NLOPT behavior
