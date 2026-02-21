@@ -913,3 +913,51 @@
 - The C function uses Fortran-style 1-based indexing via pointer decrements; the FFI
   wrapper handles this transparently by passing standard 0-based Rust arrays
 - The C dirinfcn_ mutates x in-place (unscale, call, rescale), verified via roundtrip test
+
+
+## Iteration 18 — Comparative Unit Tests for Level Computation (dirgetlevel_) (2026-02-21)
+
+### What was implemented
+- Created comparative unit tests for `direct_dirgetlevel_()` verifying Rust `get_level()`
+  produces identical results to the NLOPT C function for both algorithm variants
+- Jones Original (jones=0) tests: the level formula `k*n + (n-p)` when k==help, or
+  `k*n + p` when k!=help, where help=length[dim0], k=min(all lengths), p=count(dims==help)
+- Gablonsky (jones=1) tests: level = min(all length indices), equivalent to get_max_deep()
+- Test cases cover all PRD requirements:
+  - Uniform lengths [0,0,0]: both variants produce 0
+  - Mixed [1,0,1]: jones=0→2, jones=1→0
+  - All equal [2,2,2]: jones=0→6, jones=1→2
+  - Asymmetric [0,1,2,3]: jones=0→3, jones=1→0
+  - 1D edge case: [0]→0, [3]→3, [5]→5 for both variants
+  - 2D cases: 6 configurations testing both k==help and k!=help branches
+  - 5D cases: 4 configurations including mixed high-dimensional lengths
+  - Partial match cases: [2,2,1], [1,2,2], [3,1,3,1] testing p counting
+- Cross-validation test: 29 length configurations × 2 jones values = 58 comparisons
+- Known-value verification: hand-computed expected values checked against both C and Rust
+- Multi-position test: rectangles at positions 1, 5, and 10 verify indexing correctness
+- FFI calls `direct_dirgetlevel_()` from DIRsubrout.c with proper Fortran-style 1-based
+  pointer arithmetic handling
+
+### Files created
+- tests/test_level_compare.rs (19 comparative unit tests)
+
+### Files modified
+- plans/prd-direct-nlopt.json (marked level computation test-unit as passes: true)
+
+### Git commits
+- `b5d74f8` test(storage): add comparative level computation tests vs NLOPT C dirgetlevel_
+
+### Test results
+- 228 tests passed, 0 failed (+19 new tests)
+  - 188 lib tests, 6 nlopt_ffi tests, 19 level_compare tests, 13 scaling_compare tests, 2 doc-tests
+- No regressions
+
+### Notes
+- All 19 tests produce identical results between C and Rust implementations
+- The C code uses Fortran-style 1-based column-major indexing via pointer decrement:
+  `length -= (1 + n)` then accesses `length[dim_1based + pos_1based * n]`,
+  which maps to 0-based `length[dim_0 + pos_0 * n]` matching Rust's layout
+- Jones Original (jones=0) level computation is more complex: it tracks both
+  the minimum length (k) and the count of dimensions equal to the first dimension's
+  length (p), producing a finer-grained level that distinguishes rectangle shapes
+- Gablonsky (jones=1) simply returns min(all lengths), same as get_max_deep()
