@@ -1089,3 +1089,51 @@
 - The epsilon test threshold formula min(minf - eps_rel*|minf|, minf - eps_abs) is faithfully replicated
 - Jones Original level computation with non-cube rects (k*n + p formula) verified working correctly
 - The infeasible anchor (depth -1 / anchor[0]) handling is correctly appended after hull elimination
+
+
+## Iteration 23 — Comparative Unit Tests for divide_rectangle (dirdivide_) (2026-02-21)
+
+### What was implemented
+- Created comparative unit tests verifying that Rust `Direct::divide_rectangle()` produces identical
+  length arrays to NLOPT C `direct_dirdivide_()` in DIRsubrout.c lines 944-1009
+- Tests call both the C function via FFI and the Rust function with identical inputs, then compare
+  all resulting length arrays (parent + all pos/neg children)
+- 17 tests covering:
+  - 3D with unequal w-values verifying dimension sort by min(f+, f-)
+  - 2D with equal w-values verifying stable sort preserves original order
+  - 1D single-dimension division
+  - Nonzero current_length (depth > 0) verifying length increment is current_length + 1
+  - Parent having all divided dims set to new_len
+  - 3D with only 2 of 3 dims longest (partial division)
+  - w = min(f_pos, f_neg) with large positive/small negative asymmetry
+  - 5D with all dims verifying complete sort order and length cascade
+  - Deep level (current_length=5) division
+  - Degenerate case: all same f-values
+  - Negative f-values
+  - Mixed parent lengths (non-uniform)
+  - Non-sequential arrayi order (reversed dims)
+  - Tiny f-value differences testing sort stability
+  - Comprehensive sweep of 1D/2D/3D/4D scenarios
+  - Explicit cascade pattern verification (first-sorted dims set in ALL subsequent children)
+  - End-to-end integrated test (initialize → sample → evaluate → divide)
+- All tests confirm bit-exact match between NLOPT C and Rust implementations
+
+### Files created
+- direct-nlopt-rs/tests/test_divide_compare.rs
+
+### Files modified
+- plans/prd-direct-nlopt.json (marked divide_rectangle test-unit as passes: true)
+
+### Git commits
+- `5f6443a` test(direct): add comparative unit tests for divide_rectangle (dirdivide_)
+
+### Test results
+- No regressions in existing tests
+
+### Notes
+- The C FFI wrapper carefully handles NLOPT's Fortran-style 1-based column-major indexing with
+  parameter adjustments (f -= 3, --point, --arrayi, length -= (1+n))
+- The internal sorting uses dirinsertlist_2__ (sorted insertion) and dirsearchmin_ (extract minimum),
+  which together implement insertion sort by w-value — confirmed identical to Rust's sort_by approach
+- The length cascade pattern is faithfully replicated: dimensions divided first (lower w) get their
+  length set in ALL children from that sort position onward
