@@ -17,7 +17,10 @@
 //! | `Direct::evaluate_sample_points()` | `direct_dirsamplef_()`     | DIRserial.c      |
 //! | `Direct::divide_rectangle()`    | `direct_dirdivide_()`         | DIRsubrout.c     |
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+
+use rayon::prelude::*;
 
 use crate::error::{DirectError, Result};
 use crate::storage::RectangleStorage;
@@ -104,6 +107,11 @@ pub struct Direct {
 
     /// Total iterations.
     pub nit: usize,
+
+    /// Force-stop flag: when set to true, subsequent evaluations are skipped.
+    /// Matches NLOPT's `force_stop` pointer in `direct_dirsamplef_()`.
+    /// Thread-safe for use in parallel evaluation.
+    pub force_stop: Arc<AtomicBool>,
 }
 
 impl Direct {
@@ -177,6 +185,7 @@ impl Direct {
             actmaxdeep: 0,
             nfev: 0,
             nit: 0,
+            force_stop: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -479,6 +488,14 @@ impl Direct {
     /// 1. Evaluate all 2×maxi points, tracking fmax and setting feasibility flags
     /// 2. Update minf/minpos for feasible points only
     ///
+    /// When `options.parallel` is `true`, evaluations are performed in parallel
+    /// using rayon. The storage updates remain sequential.
+    ///
+    /// # Force-stop handling
+    /// Matches NLOPT's `force_stop` check in `direct_dirsamplef_()` (lines 86-92, 124-126):
+    /// - If `force_stop` is set, the function value is set to `fmax` and the
+    ///   feasibility flag is set to -1.0 (setup error), matching `kret = -1`.
+    ///
     /// # Arguments
     /// * `new_start` — 1-based index of first new rectangle in chain
     /// * `maxi` — number of dimension splits (chain has 2×maxi rects)
@@ -488,47 +505,141 @@ impl Direct {
         maxi: usize,
     ) -> Result<()> {
         let n = self.dim;
-        let mut pos = new_start;
+        let total = 2 * maxi;
 
-        // First pass: evaluate all 2*maxi points
-        // (matches dirsamplef_ lines 73-133)
-        for _j in 0..(2 * maxi) {
-            // Copy center to temporary buffer
-            let x_norm: Vec<f64> = (0..n)
-                .map(|i| self.storage.center(pos, i))
+        if self.options.parallel && total > 1 {
+            // ── Parallel path ──
+            // Collect all normalized coordinates from the linked list
+            let mut indices: Vec<usize> = Vec::with_capacity(total);
+            let mut points: Vec<Vec<f64>> = Vec::with_capacity(total);
+            let mut pos = new_start;
+            for _ in 0..total {
+                indices.push(pos);
+                let x_norm: Vec<f64> = (0..n)
+                    .map(|i| self.storage.center(pos, i))
+                    .collect();
+                points.push(x_norm);
+                pos = self.storage.point[pos] as usize;
+            }
+
+            // Evaluate all points in parallel
+            let func = Arc::clone(&self.func);
+            let force_stop = Arc::clone(&self.force_stop);
+            let xs1 = &self.xs1;
+            let xs2 = &self.xs2;
+            let fmax_before = self.fmax;
+
+            let results: Vec<(f64, i32)> = points
+                .par_iter()
+                .map(|x_norm| {
+                    if force_stop.load(Ordering::Relaxed) {
+                        (fmax_before, -1)
+                    } else {
+                        let mut x_actual = vec![0.0; n];
+                        for i in 0..n {
+                            x_actual[i] = (x_norm[i] + xs2[i]) * xs1[i];
+                        }
+                        let f = func(&x_actual);
+                        if f.is_finite() {
+                            (f, 0) // kret = 0: feasible
+                        } else {
+                            (f64::MAX, 1) // kret >= 1: infeasible
+                        }
+                    }
+                })
                 .collect();
 
-            // Evaluate (matches dirinfcn_ call in dirsamplef_ line 89)
-            let (f_val, feasible) = self.evaluate(&x_norm);
-            self.nfev += 1;
+            self.nfev += total;
 
-            let kret: i32 = if feasible { 0 } else { 1 };
-            self.iinfeasible = self.iinfeasible.max(kret);
+            // Apply results to storage sequentially (matching C's ordering)
+            for (j, &idx) in indices.iter().enumerate() {
+                let (f_val, kret) = results[j];
+                self.iinfeasible = self.iinfeasible.max(kret);
 
-            if kret == 0 {
-                // Feasible (matches dirsamplef_ lines 97-109)
-                self.storage.set_f(pos, f_val, 0.0);
-                self.ifeasible_f = 0;
-                self.fmax = self.fmax.max(f_val);
-            } else {
-                // Infeasible: kret >= 1 (matches dirsamplef_ lines 111-119)
-                self.storage.set_f(pos, self.fmax, 2.0);
+                if kret == 0 {
+                    // Feasible (matches dirsamplef_ lines 97-109)
+                    self.storage.set_f(idx, f_val, 0.0);
+                    self.ifeasible_f = 0;
+                    self.fmax = self.fmax.max(f_val);
+                } else if kret >= 1 {
+                    // Infeasible (matches dirsamplef_ lines 111-119)
+                    self.storage.set_f(idx, self.fmax, 2.0);
+                } else {
+                    // kret == -1: force_stop / setup error (matches dirsamplef_ lines 124-126)
+                    self.storage.set_f(idx, self.fmax, -1.0);
+                }
             }
 
-            pos = self.storage.point[pos] as usize;
-        }
-
-        // Second pass: update minf, minpos for feasible points only
-        // (matches dirsamplef_ lines 141-149)
-        pos = new_start;
-        for _j in 0..(2 * maxi) {
-            if self.storage.f_val(pos) < self.minf
-                && self.storage.f_flag(pos) == 0.0
-            {
-                self.minf = self.storage.f_val(pos);
-                self.minpos = pos;
+            // Second pass: update minf, minpos for feasible points only
+            // (matches dirsamplef_ lines 141-149)
+            for &idx in &indices {
+                if self.storage.f_val(idx) < self.minf
+                    && self.storage.f_flag(idx) == 0.0
+                {
+                    self.minf = self.storage.f_val(idx);
+                    self.minpos = idx;
+                }
             }
-            pos = self.storage.point[pos] as usize;
+        } else {
+            // ── Serial path — identical to NLOPT C evaluation order ──
+            let mut pos = new_start;
+
+            // First pass: evaluate all 2*maxi points
+            // (matches dirsamplef_ lines 73-133)
+            for _j in 0..total {
+                // Check force_stop before evaluation (matches dirsamplef_ lines 86-87)
+                if self.force_stop.load(Ordering::Relaxed) {
+                    self.storage.set_f(pos, self.fmax, -1.0);
+                    self.nfev += 1;
+                    self.iinfeasible = self.iinfeasible.max(-1);
+                    pos = self.storage.point[pos] as usize;
+                    continue;
+                }
+
+                // Copy center to temporary buffer
+                let x_norm: Vec<f64> = (0..n)
+                    .map(|i| self.storage.center(pos, i))
+                    .collect();
+
+                // Evaluate (matches dirinfcn_ call in dirsamplef_ line 89)
+                let (f_val, feasible) = self.evaluate(&x_norm);
+                self.nfev += 1;
+
+                // Check force_stop after evaluation (matches dirsamplef_ lines 91-92)
+                if self.force_stop.load(Ordering::Relaxed) {
+                    self.storage.set_f(pos, self.fmax, -1.0);
+                    pos = self.storage.point[pos] as usize;
+                    continue;
+                }
+
+                let kret: i32 = if feasible { 0 } else { 1 };
+                self.iinfeasible = self.iinfeasible.max(kret);
+
+                if kret == 0 {
+                    // Feasible (matches dirsamplef_ lines 97-109)
+                    self.storage.set_f(pos, f_val, 0.0);
+                    self.ifeasible_f = 0;
+                    self.fmax = self.fmax.max(f_val);
+                } else {
+                    // Infeasible: kret >= 1 (matches dirsamplef_ lines 111-119)
+                    self.storage.set_f(pos, self.fmax, 2.0);
+                }
+
+                pos = self.storage.point[pos] as usize;
+            }
+
+            // Second pass: update minf, minpos for feasible points only
+            // (matches dirsamplef_ lines 141-149)
+            pos = new_start;
+            for _j in 0..total {
+                if self.storage.f_val(pos) < self.minf
+                    && self.storage.f_flag(pos) == 0.0
+                {
+                    self.minf = self.storage.f_val(pos);
+                    self.minpos = pos;
+                }
+                pos = self.storage.point[pos] as usize;
+            }
         }
 
         Ok(())
@@ -1435,5 +1546,392 @@ mod tests {
         // Rect 1,4,5: sum(1,1) = 2 → anchor[3]
         assert_eq!(d.storage.anchor[2], 2);
         assert_eq!(d.storage.anchor[3], 1);
+    }
+
+    // ──────────────────────────────────────────────────────────────────
+    // Sample points tests
+    // ──────────────────────────────────────────────────────────────────
+
+    /// Helper: create a Direct instance, initialize it, then return it
+    /// ready for a second iteration's sample_points + evaluate_sample_points.
+    fn make_initialized_sphere(n: usize, parallel: bool) -> Direct {
+        let bounds: Vec<(f64, f64)> = vec![(-5.0, 5.0); n];
+        let func = |x: &[f64]| -> f64 {
+            x.iter().map(|xi| xi * xi).sum()
+        };
+        let options = crate::types::DirectOptions {
+            algorithm: crate::types::DirectAlgorithm::GablonskyLocallyBiased,
+            max_feval: 10000,
+            max_iter: 100,
+            parallel,
+            ..Default::default()
+        };
+        let mut d = Direct::new(func, &bounds, options).unwrap();
+        d.initialize().unwrap();
+        d
+    }
+
+    #[test]
+    fn test_sample_points_allocation_2d() {
+        // After init, free=6. Sample rect 1 (center) with 2 longest dims → 4 new rects.
+        let mut d = make_initialized_sphere(2, false);
+        let (arrayi, _maxi) = d.storage.get_longest_dims(1);
+        let delta = d.storage.thirds[2]; // next deeper level
+
+        let new_start = d.sample_points(1, &arrayi, delta).unwrap();
+        // 4 new rects allocated from free list starting at 6
+        assert_eq!(new_start, 6);
+        // Chain: 6→7→8→9→0
+        assert_eq!(d.storage.point[9], 0);
+        // Free should advance past 4 slots
+        assert_eq!(d.storage.free, 10);
+    }
+
+    #[test]
+    fn test_sample_points_centers_2d() {
+        let mut d = make_initialized_sphere(2, false);
+        let (arrayi, _maxi) = d.storage.get_longest_dims(1);
+        let delta = d.storage.thirds[2]; // 1/9
+
+        let new_start = d.sample_points(1, &arrayi, delta).unwrap();
+
+        let parent_c0 = d.storage.center(1, 0);
+        let parent_c1 = d.storage.center(1, 1);
+
+        // First dim: positive then negative
+        let pos1 = new_start;
+        let neg1 = d.storage.point[pos1] as usize;
+
+        assert!((d.storage.center(pos1, arrayi[0] - 1) - (parent_c0 + delta)).abs() < 1e-15
+            || (d.storage.center(pos1, arrayi[1] - 1) - (parent_c1 + delta)).abs() < 1e-15);
+
+        // Second dim: positive then negative
+        let pos2 = d.storage.point[neg1] as usize;
+        let neg2 = d.storage.point[pos2] as usize;
+
+        // Chain ends at neg2
+        assert_eq!(d.storage.point[neg2], 0);
+    }
+
+    #[test]
+    fn test_sample_points_1d() {
+        let mut d = make_initialized_sphere(1, false);
+        let (arrayi, maxi) = d.storage.get_longest_dims(1);
+        assert_eq!(maxi, 1);
+        let delta = d.storage.thirds[2];
+
+        let new_start = d.sample_points(1, &arrayi, delta).unwrap();
+        // 2 new rects (2*1)
+        let pos1 = new_start;
+        let neg1 = d.storage.point[pos1] as usize;
+        assert_eq!(d.storage.point[neg1], 0); // chain ends
+
+        // Check offsets
+        let parent_c = d.storage.center(1, 0);
+        assert!((d.storage.center(pos1, 0) - (parent_c + delta)).abs() < 1e-15);
+        assert!((d.storage.center(neg1, 0) - (parent_c - delta)).abs() < 1e-15);
+    }
+
+    #[test]
+    fn test_evaluate_sample_points_serial_order_2d() {
+        // Verify that serial evaluation counts correct number of evals
+        let mut d = make_initialized_sphere(2, false);
+        let init_nfev = d.nfev; // 5
+        let (arrayi, maxi) = d.storage.get_longest_dims(1);
+        let delta = d.storage.thirds[2];
+        let new_start = d.sample_points(1, &arrayi, delta).unwrap();
+        d.evaluate_sample_points(new_start, maxi).unwrap();
+
+        // 2*maxi = 4 new evaluations
+        assert_eq!(d.nfev, init_nfev + 2 * maxi);
+    }
+
+    #[test]
+    fn test_evaluate_sample_points_feasibility_flags() {
+        // Use a function that returns NaN for some regions
+        let bounds = vec![(0.0, 1.0)];
+        let func = |x: &[f64]| -> f64 {
+            if x[0] < 0.1 {
+                f64::NAN
+            } else {
+                x[0] * x[0]
+            }
+        };
+        let options = crate::types::DirectOptions {
+            algorithm: crate::types::DirectAlgorithm::GablonskyLocallyBiased,
+            max_feval: 10000,
+            max_iter: 100,
+            parallel: false,
+            ..Default::default()
+        };
+        let mut d = Direct::new(func, &bounds, options).unwrap();
+        d.initialize().unwrap();
+
+        // Center=0.5 → actual=0.5 → feasible
+        // Pos=5/6 → feasible, Neg=1/6 → feasible (> 0.1)
+        assert_eq!(d.ifeasible_f, 0);
+    }
+
+    #[test]
+    fn test_evaluate_sample_points_infeasible_tracking() {
+        // Function that always returns NaN → all infeasible
+        let bounds = vec![(0.0, 1.0)];
+        let func = |_x: &[f64]| -> f64 { f64::NAN };
+        let options = crate::types::DirectOptions {
+            algorithm: crate::types::DirectAlgorithm::GablonskyLocallyBiased,
+            max_feval: 10000,
+            max_iter: 100,
+            parallel: false,
+            ..Default::default()
+        };
+        let mut d = Direct::new(func, &bounds, options).unwrap();
+        d.initialize().unwrap();
+
+        assert!(d.iinfeasible >= 1);
+    }
+
+    #[test]
+    fn test_evaluate_sample_points_fmax_tracking() {
+        let mut d = make_initialized_sphere(2, false);
+        let fmax_after_init = d.fmax;
+
+        // For sphere on [-5,5]^2, initial sample points at ± 1/3 from center
+        // produce f = 100/9 ≈ 11.11, which should be fmax
+        assert!((fmax_after_init - 100.0 / 9.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_evaluate_sample_points_minf_minpos_update() {
+        let bounds = vec![(0.0, 2.0)];
+        let func = |x: &[f64]| -> f64 { (x[0] - 1.5).powi(2) };
+        let options = crate::types::DirectOptions {
+            algorithm: crate::types::DirectAlgorithm::GablonskyLocallyBiased,
+            max_feval: 10000,
+            max_iter: 100,
+            parallel: false,
+            ..Default::default()
+        };
+        let mut d = Direct::new(func, &bounds, options).unwrap();
+        d.initialize().unwrap();
+
+        // Center at 0.5 → actual = 1.0 → f = 0.25
+        // Pos = 0.5+1/3 → actual ≈ 1.667 → f ≈ 0.028
+        // minf should be the smallest feasible value
+        assert!(d.minf < 0.25 + 1e-10);
+    }
+
+    // ──────────────────────────────────────────────────────────────────
+    // Parallel vs serial comparison tests
+    // ──────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_parallel_vs_serial_sphere_2d() {
+        let d_serial = make_initialized_sphere(2, false);
+        let d_parallel = make_initialized_sphere(2, true);
+
+        assert_eq!(d_serial.nfev, d_parallel.nfev);
+        assert_eq!(d_serial.minf, d_parallel.minf);
+        assert_eq!(d_serial.minpos, d_parallel.minpos);
+        assert_eq!(d_serial.fmax, d_parallel.fmax);
+        assert_eq!(d_serial.ifeasible_f, d_parallel.ifeasible_f);
+        assert_eq!(d_serial.iinfeasible, d_parallel.iinfeasible);
+
+        for idx in 1..=5 {
+            assert_eq!(d_serial.storage.f_val(idx), d_parallel.storage.f_val(idx),
+                "f_val mismatch at idx {}", idx);
+            assert_eq!(d_serial.storage.f_flag(idx), d_parallel.storage.f_flag(idx),
+                "f_flag mismatch at idx {}", idx);
+            for j in 0..2 {
+                assert!((d_serial.storage.center(idx, j) - d_parallel.storage.center(idx, j)).abs() < 1e-15,
+                    "center mismatch at idx {}, dim {}", idx, j);
+                assert_eq!(d_serial.storage.length(idx, j), d_parallel.storage.length(idx, j),
+                    "length mismatch at idx {}, dim {}", idx, j);
+            }
+        }
+    }
+
+    #[test]
+    fn test_parallel_vs_serial_sphere_3d() {
+        let d_serial = make_initialized_sphere(3, false);
+        let d_parallel = make_initialized_sphere(3, true);
+
+        assert_eq!(d_serial.nfev, d_parallel.nfev);
+        assert_eq!(d_serial.minf, d_parallel.minf);
+        assert_eq!(d_serial.minpos, d_parallel.minpos);
+        assert_eq!(d_serial.fmax, d_parallel.fmax);
+
+        for idx in 1..=7 {
+            assert_eq!(d_serial.storage.f_val(idx), d_parallel.storage.f_val(idx));
+            assert_eq!(d_serial.storage.f_flag(idx), d_parallel.storage.f_flag(idx));
+        }
+    }
+
+    #[test]
+    fn test_parallel_vs_serial_sphere_5d() {
+        let d_serial = make_initialized_sphere(5, false);
+        let d_parallel = make_initialized_sphere(5, true);
+
+        assert_eq!(d_serial.nfev, d_parallel.nfev);
+        assert_eq!(d_serial.minf, d_parallel.minf);
+        assert_eq!(d_serial.minpos, d_parallel.minpos);
+        assert_eq!(d_serial.fmax, d_parallel.fmax);
+
+        for idx in 1..=11 {
+            assert_eq!(d_serial.storage.f_val(idx), d_parallel.storage.f_val(idx));
+            assert_eq!(d_serial.storage.f_flag(idx), d_parallel.storage.f_flag(idx));
+        }
+    }
+
+    #[test]
+    fn test_parallel_vs_serial_rosenbrock_2d() {
+        let bounds = vec![(-5.0, 5.0), (-5.0, 5.0)];
+        let rosenbrock = |x: &[f64]| -> f64 {
+            let a = 1.0 - x[0];
+            let b = x[1] - x[0] * x[0];
+            a * a + 100.0 * b * b
+        };
+
+        let make = |parallel: bool| -> Direct {
+            let options = crate::types::DirectOptions {
+                algorithm: crate::types::DirectAlgorithm::GablonskyLocallyBiased,
+                max_feval: 10000,
+                max_iter: 100,
+                parallel,
+                ..Default::default()
+            };
+            let mut d = Direct::new(rosenbrock, &bounds, options).unwrap();
+            d.initialize().unwrap();
+            d
+        };
+
+        let d_serial = make(false);
+        let d_parallel = make(true);
+
+        assert_eq!(d_serial.nfev, d_parallel.nfev);
+        assert!((d_serial.minf - d_parallel.minf).abs() < 1e-12);
+        assert_eq!(d_serial.minpos, d_parallel.minpos);
+    }
+
+    #[test]
+    fn test_parallel_second_iteration_2d() {
+        let bounds = vec![(-5.0, 5.0), (-5.0, 5.0)];
+        let func = |x: &[f64]| -> f64 { x.iter().map(|xi| xi * xi).sum() };
+
+        let run = |parallel: bool| -> (f64, usize, f64) {
+            let options = crate::types::DirectOptions {
+                algorithm: crate::types::DirectAlgorithm::GablonskyLocallyBiased,
+                max_feval: 10000,
+                max_iter: 100,
+                parallel,
+                ..Default::default()
+            };
+            let mut d = Direct::new(func, &bounds, options).unwrap();
+            d.initialize().unwrap();
+
+            let (arrayi, maxi) = d.storage.get_longest_dims(2);
+            let depth = d.storage.get_max_deep(2);
+            let delta = d.storage.thirds[(depth + 1) as usize];
+            let new_start = d.sample_points(2, &arrayi, delta).unwrap();
+            d.evaluate_sample_points(new_start, maxi).unwrap();
+
+            (d.minf, d.nfev, d.fmax)
+        };
+
+        let (minf_s, nfev_s, fmax_s) = run(false);
+        let (minf_p, nfev_p, fmax_p) = run(true);
+
+        assert_eq!(nfev_s, nfev_p);
+        assert!((minf_s - minf_p).abs() < 1e-12);
+        assert!((fmax_s - fmax_p).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_force_stop_serial() {
+        let bounds = vec![(-5.0, 5.0), (-5.0, 5.0)];
+        let func = |x: &[f64]| -> f64 { x.iter().map(|xi| xi * xi).sum() };
+        let options = crate::types::DirectOptions {
+            algorithm: crate::types::DirectAlgorithm::GablonskyLocallyBiased,
+            max_feval: 10000,
+            max_iter: 100,
+            parallel: false,
+            ..Default::default()
+        };
+        let mut d = Direct::new(func, &bounds, options).unwrap();
+        d.initialize().unwrap();
+
+        // Set force_stop before second sample evaluation
+        d.force_stop.store(true, Ordering::Relaxed);
+
+        let (arrayi, maxi) = d.storage.get_longest_dims(1);
+        let delta = d.storage.thirds[2];
+        let new_start = d.sample_points(1, &arrayi, delta).unwrap();
+        d.evaluate_sample_points(new_start, maxi).unwrap();
+
+        // All new points should have f_flag = -1.0 (force_stop)
+        let mut pos = new_start;
+        for _ in 0..(2 * maxi) {
+            assert_eq!(d.storage.f_flag(pos), -1.0,
+                "Expected f_flag=-1.0 for force_stopped point at idx {}", pos);
+            pos = d.storage.point[pos] as usize;
+        }
+    }
+
+    #[test]
+    fn test_force_stop_parallel() {
+        let bounds = vec![(-5.0, 5.0), (-5.0, 5.0)];
+        let func = |x: &[f64]| -> f64 { x.iter().map(|xi| xi * xi).sum() };
+        let options = crate::types::DirectOptions {
+            algorithm: crate::types::DirectAlgorithm::GablonskyLocallyBiased,
+            max_feval: 10000,
+            max_iter: 100,
+            parallel: true,
+            ..Default::default()
+        };
+        let mut d = Direct::new(func, &bounds, options).unwrap();
+        d.initialize().unwrap();
+
+        d.force_stop.store(true, Ordering::Relaxed);
+
+        let (arrayi, maxi) = d.storage.get_longest_dims(1);
+        let delta = d.storage.thirds[2];
+        let new_start = d.sample_points(1, &arrayi, delta).unwrap();
+        d.evaluate_sample_points(new_start, maxi).unwrap();
+
+        let mut pos = new_start;
+        for _ in 0..(2 * maxi) {
+            assert_eq!(d.storage.f_flag(pos), -1.0,
+                "Expected f_flag=-1.0 for force_stopped point at idx {}", pos);
+            pos = d.storage.point[pos] as usize;
+        }
+    }
+
+    #[test]
+    fn test_parallel_with_infeasible_points() {
+        let bounds = vec![(-5.0, 5.0), (-5.0, 5.0)];
+        let func = |x: &[f64]| -> f64 {
+            let r: f64 = x.iter().map(|xi| xi * xi).sum();
+            if r > 10.0 { f64::NAN } else { r }
+        };
+
+        let run = |parallel: bool| -> (f64, usize, i32, i32) {
+            let options = crate::types::DirectOptions {
+                algorithm: crate::types::DirectAlgorithm::GablonskyLocallyBiased,
+                max_feval: 10000,
+                max_iter: 100,
+                parallel,
+                ..Default::default()
+            };
+            let mut d = Direct::new(func, &bounds, options).unwrap();
+            d.initialize().unwrap();
+            (d.minf, d.nfev, d.ifeasible_f, d.iinfeasible)
+        };
+
+        let (minf_s, nfev_s, ifeas_s, iinfeas_s) = run(false);
+        let (minf_p, nfev_p, ifeas_p, iinfeas_p) = run(true);
+
+        assert_eq!(nfev_s, nfev_p);
+        assert!((minf_s - minf_p).abs() < 1e-12);
+        assert_eq!(ifeas_s, ifeas_p);
+        assert_eq!(iinfeas_s, iinfeas_p);
     }
 }

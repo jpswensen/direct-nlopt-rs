@@ -542,3 +542,56 @@
 - divide_rectangle uses stable sort to match NLOPT's insertion sort behavior
 - For the sphere function on [-5,5]^2, all 4 sample f-values are exactly 100/9 (symmetric),
   so the stable sort preserves dimension ordering (dim 1 before dim 2)
+
+
+## Iteration 6 — Implement sample_points parallel path + force_stop (2026-02-21)
+
+### What was implemented
+- Enhanced `evaluate_sample_points()` with parallel evaluation path using rayon
+  - When `options.parallel=true` and total points > 1, uses `rayon::par_iter` to evaluate
+    all 2×maxi sample points concurrently
+  - Collects normalized coordinates from the linked list, evaluates in parallel, then
+    applies results to storage sequentially (preserving storage update order)
+  - The parallel path uses `Arc<ObjectiveFn>` and inline unscaling (xs1/xs2) to avoid
+    borrowing self during parallel evaluation
+- Added `force_stop` field to `Direct` struct as `Arc<AtomicBool>` for thread-safe
+  force-stop signaling, matching NLOPT's `force_stop` pointer in `direct_dirsamplef_()`
+- Serial path now checks force_stop before and after each evaluation, matching
+  DIRserial.c lines 86-92 and 124-126:
+  - Before eval: if force_stop set, skip evaluation, set f=fmax and flag=-1.0
+  - After eval: if force_stop set during eval, mark point with flag=-1.0
+- Parallel path checks force_stop per-point via `Ordering::Relaxed` atomic load
+- Added `use rayon::prelude::*` and `use std::sync::atomic::{AtomicBool, Ordering}` imports
+- Verified serial path evaluation order remains identical to NLOPT C:
+  positive offset first, then negative, for each dimension sequentially
+- Flagging matches NLOPT C exactly: kret=0 → flag=0.0, kret≥1 → flag=2.0, kret=-1 → flag=-1.0
+
+### Files modified
+- direct-nlopt-rs/src/direct.rs (parallel evaluate_sample_points, force_stop, 16 new tests)
+
+### Git commits
+- `e2f059f` feat(direct): implement parallel sample evaluation with rayon and force_stop
+
+### Test results
+- 111 tests passed, 0 failed (+16 new tests)
+- cargo clippy clean (0 warnings)
+- New tests cover:
+  - sample_points allocation verification (2D, 1D)
+  - sample_points center offsets (2D, 1D)
+  - Serial evaluation order and nfev count
+  - Feasibility flag tracking (feasible, infeasible, all-infeasible)
+  - fmax tracking
+  - minf/minpos update
+  - Parallel vs serial equivalence: sphere 2D/3D/5D, Rosenbrock 2D
+  - Parallel second iteration (beyond initialization)
+  - force_stop in serial and parallel modes
+  - Parallel with mixed feasible/infeasible points
+
+### Notes
+- The parallel path evaluates all points concurrently but applies fmax/ifeasible updates
+  sequentially, so infeasible point replacement may use a slightly stale fmax value
+  compared to the serial path when some points are infeasible — this is acceptable
+  because fmax is only used for placeholder values of infeasible points
+- For all-feasible functions (common case), parallel and serial produce bit-identical results
+- During initialization, parallel=true takes the serial path if only 1 point (never in
+  practice since init always has 2n ≥ 2 points)
