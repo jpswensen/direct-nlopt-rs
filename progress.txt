@@ -1726,3 +1726,45 @@
   when many rectangles are selected per iteration but still subject to threshold check
 - Users with expensive objective functions (>10µs per eval) can set min_parallel_evals=1
 - Users with cheap objectives should either disable parallel or use a high threshold
+
+
+## Iteration 5 — Benchmark parallel speedup on expensive objective functions (2026-02-21)
+
+### What was implemented
+- Created examples/parallel_stress_test.rs with expensive_rosenbrock and expensive_rastrigin
+  functions that add 10,000 sin/cos iterations per evaluation to simulate costly objectives
+  (matching direct-rs/examples/parallel_stress_test.rs pattern)
+- Example benchmarks 2D, 3D, 5D, and 8D dimensions comparing parallel=true vs parallel=false
+- Added expensive_rosenbrock and expensive_rastrigin benchmark groups to Criterion suite
+  (benches/benchmarks.rs) covering 2D, 3D, 5D, 8D with serial vs parallel comparison
+- Ran the stress test which shows clear speedup scaling with dimension:
+  - 2D: ~1.05x speedup (only 4 evals per division, overhead dominates)
+  - 3D: ~1.39x speedup (6 evals per division)
+  - 5D: ~2.62x speedup (10 evals per division)
+  - 8D: ~4.37x speedup (16 evals per division, good parallel utilization)
+- Optimal dimensionality for parallelization: 5D+ with expensive objectives
+- Results confirm that parallel benefit scales with both dimension and evaluation cost
+
+### Files created
+- direct-nlopt-rs/examples/parallel_stress_test.rs
+
+### Files modified
+- direct-nlopt-rs/benches/benchmarks.rs (added expensive_rosenbrock, expensive_rastrigin
+  functions and bench_expensive_rosenbrock, bench_expensive_rastrigin Criterion groups
+  covering 2D, 3D, 5D, 8D serial vs parallel)
+- plans/prd-direct-nlopt.json (marked expensive parallel benchmark as passes: true)
+
+### Git commits
+- `e764918` perf(bench): benchmark parallel speedup on expensive objective functions
+
+### Test results
+- All 201 tests pass, no regressions
+- Example compiles and runs successfully with --release
+- Criterion benchmarks list all 16 new expensive function benchmark configurations
+
+### Notes
+- Speedup scales approximately linearly with dimension for expensive objectives
+- At 2D the overhead of rayon thread pool scheduling roughly cancels the parallelism benefit
+- At 8D with 16 available cores and 16 evals per division, we see ~4.4x speedup
+- For cheap objectives, parallel mode can be slower due to rayon overhead
+- Users should enable parallel only when objective evaluation cost exceeds ~10µs

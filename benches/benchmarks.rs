@@ -47,6 +47,40 @@ fn expensive_sphere(x: &[f64]) -> f64 {
     acc - (acc - base)
 }
 
+/// Expensive Rosenbrock with 10,000 sin/cos iterations per evaluation.
+fn expensive_rosenbrock(x: &[f64]) -> f64 {
+    let mut extra_work = 0.0;
+    for _ in 0..10_000 {
+        for xi in x.iter() {
+            extra_work += (xi.sin() * xi.cos()).abs();
+        }
+    }
+    let mut result = 0.0;
+    for i in 0..x.len() - 1 {
+        let t1 = x[i + 1] - x[i] * x[i];
+        let t2 = 1.0 - x[i];
+        result += 100.0 * t1 * t1 + t2 * t2;
+    }
+    result + extra_work * 1e-20
+}
+
+/// Expensive Rastrigin with 10,000 sin/cos iterations per evaluation.
+fn expensive_rastrigin(x: &[f64]) -> f64 {
+    let mut extra_work = 0.0;
+    for _ in 0..10_000 {
+        for xi in x.iter() {
+            extra_work += (xi.sin() * xi.cos()).abs();
+        }
+    }
+    let a = 10.0;
+    let n = x.len() as f64;
+    let result = a * n
+        + x.iter()
+            .map(|&xi| xi * xi - a * (2.0 * std::f64::consts::PI * xi).cos())
+            .sum::<f64>();
+    result + extra_work * 1e-20
+}
+
 // ── Standard test function benchmarks (matching nlopt_bench.c) ──
 
 fn bench_sphere(c: &mut Criterion) {
@@ -352,12 +386,98 @@ fn bench_parallel_threshold_expensive(c: &mut Criterion) {
     group.finish();
 }
 
+// ── Expensive function benchmarks: parallel speedup at different dimensions ──
+
+fn bench_expensive_rosenbrock(c: &mut Criterion) {
+    let mut group = c.benchmark_group("expensive_rosenbrock");
+    group.sample_size(10);
+
+    for &dim in &[2, 3, 5, 8] {
+        let bounds = vec![(-5.0, 10.0); dim];
+
+        group.bench_with_input(
+            BenchmarkId::new("serial", dim),
+            &dim,
+            |b, _| {
+                b.iter(|| {
+                    DirectBuilder::new(expensive_rosenbrock, bounds.clone())
+                        .algorithm(DirectAlgorithm::GablonskyLocallyBiased)
+                        .max_feval(500)
+                        .parallel(false)
+                        .minimize()
+                        .unwrap()
+                })
+            },
+        );
+
+        group.bench_with_input(
+            BenchmarkId::new("parallel", dim),
+            &dim,
+            |b, _| {
+                b.iter(|| {
+                    DirectBuilder::new(expensive_rosenbrock, bounds.clone())
+                        .algorithm(DirectAlgorithm::GablonskyLocallyBiased)
+                        .max_feval(500)
+                        .parallel(true)
+                        .minimize()
+                        .unwrap()
+                })
+            },
+        );
+    }
+
+    group.finish();
+}
+
+fn bench_expensive_rastrigin(c: &mut Criterion) {
+    let mut group = c.benchmark_group("expensive_rastrigin");
+    group.sample_size(10);
+
+    for &dim in &[2, 3, 5, 8] {
+        let bounds = vec![(-5.12, 5.12); dim];
+
+        group.bench_with_input(
+            BenchmarkId::new("serial", dim),
+            &dim,
+            |b, _| {
+                b.iter(|| {
+                    DirectBuilder::new(expensive_rastrigin, bounds.clone())
+                        .algorithm(DirectAlgorithm::GablonskyLocallyBiased)
+                        .max_feval(500)
+                        .parallel(false)
+                        .minimize()
+                        .unwrap()
+                })
+            },
+        );
+
+        group.bench_with_input(
+            BenchmarkId::new("parallel", dim),
+            &dim,
+            |b, _| {
+                b.iter(|| {
+                    DirectBuilder::new(expensive_rastrigin, bounds.clone())
+                        .algorithm(DirectAlgorithm::GablonskyLocallyBiased)
+                        .max_feval(500)
+                        .parallel(true)
+                        .minimize()
+                        .unwrap()
+                })
+            },
+        );
+    }
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_sphere,
     bench_rosenbrock,
     bench_rastrigin,
     bench_parallel_threshold_cheap,
-    bench_parallel_threshold_expensive
+    bench_parallel_threshold_expensive,
+    bench_expensive_rosenbrock,
+    bench_expensive_rastrigin
 );
 criterion_main!(benches);
