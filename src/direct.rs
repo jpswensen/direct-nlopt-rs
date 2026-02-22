@@ -3158,6 +3158,8 @@ mod tests {
         let mut d = Direct::new(
             move |x: &[f64]| {
                 counter2.fetch_add(1, Ordering::Relaxed);
+                // Sleep briefly so force_stop signal arrives before max_feval
+                std::thread::sleep(std::time::Duration::from_micros(100));
                 x.iter().map(|xi| xi * xi).sum()
             },
             &bounds,

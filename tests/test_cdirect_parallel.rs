@@ -481,3 +481,62 @@ fn test_objective_using_rayon_internally_no_panic() {
         .unwrap();
     assert!(parallel_result.fun.is_finite());
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Verify CDirect parallel actually uses multiple threads
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Verifies that CDirect LocallyBiased parallel mode actually evaluates
+/// objective function calls on multiple threads.
+///
+/// Regression: the old threshold check `qualifying_keys.len() * 2` underestimated
+/// the actual batch size for Path A (which produces 2 * n_dims points per rect).
+/// With LocallyBiased (DIRECT-L), often only 1 rect qualifies per iteration,
+/// causing the estimate to be 2 < min_parallel_evals (4), which fell back to a
+/// completely serial code path. The fix: check all_points.len() AFTER building
+/// the candidate list (matching the Gablonsky parallel pattern).
+#[test]
+fn test_cdirect_locally_biased_parallel_uses_multiple_threads() {
+    use std::collections::HashSet;
+    use std::sync::Mutex;
+
+    let thread_ids: Arc<Mutex<HashSet<std::thread::ThreadId>>> =
+        Arc::new(Mutex::new(HashSet::new()));
+    let thread_ids_clone = Arc::clone(&thread_ids);
+
+    // Objective with a small sleep to ensure rayon distributes work across threads
+    let slow_sphere = move |x: &[f64]| -> f64 {
+        thread_ids_clone
+            .lock()
+            .unwrap()
+            .insert(std::thread::current().id());
+        // Small sleep so rayon has time to distribute across threads
+        std::thread::sleep(std::time::Duration::from_millis(1));
+        x.iter().map(|xi| xi * xi).sum()
+    };
+
+    // 5D problem: Path A produces 2*5=10 candidate points per rect — well above threshold
+    let bounds = vec![(-5.0, 5.0); 5];
+
+    let opts = DirectOptions {
+        max_feval: 500,
+        algorithm: DirectAlgorithm::LocallyBiased,
+        parallel: true,
+        min_parallel_evals: 4,
+        ..Default::default()
+    };
+
+    let result = CDirect::new(slow_sphere, bounds, opts)
+        .minimize()
+        .unwrap();
+
+    assert!(result.fun.is_finite());
+    assert!(result.nfev > 50, "Should have done many evaluations, got {}", result.nfev);
+
+    let unique_threads = thread_ids.lock().unwrap().len();
+    assert!(
+        unique_threads >= 2,
+        "CDirect parallel should use multiple threads, but only used {}",
+        unique_threads
+    );
+}

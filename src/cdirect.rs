@@ -1084,11 +1084,13 @@ impl CDirect {
 
     /// Parallel version of `divide_good_rects()`.
     ///
-    /// Uses a collect→parallel-eval→apply pattern:
+    /// Uses a collect→eval→apply pattern (matching `process_selected_rects_batch`
+    /// in the Gablonsky backend):
     /// 1. Compute convex hull (read-only on tree)
     /// 2. Identify qualifying rectangles via epsilon test
-    /// 3. For each qualifying rect, compute candidate evaluation points
-    /// 4. Batch-evaluate all points in parallel via rayon
+    /// 3. For each qualifying rect, remove from tree and compute candidate points
+    /// 4. Evaluate all points — via rayon `par_iter` when the batch meets
+    ///    `min_parallel_evals`, otherwise plain `iter`
     /// 5. Apply results sequentially: dimension sorts, child creation, tree insertion
     ///
     /// The serial `divide_good_rects()` interleaves evaluation with tree mutation
@@ -1199,23 +1201,6 @@ impl CDirect {
                     }
                     return Ok(false);
                 }
-            }
-
-            // If the number of candidate evaluations is below the parallel
-            // threshold, fall back to serial subdivision for this iteration.
-            // Estimate: each rect produces at least 2 evals.
-            let est_evals: usize = qualifying_keys.len() * 2;
-            if est_evals < self.options.min_parallel_evals {
-                // Use serial path for this batch
-                for key in &qualifying_keys {
-                    let ret = self.divide_rect_by_key(
-                        func, p, key, max_feval, max_time, start_time,
-                    );
-                    if let Some(code) = ret {
-                        return Err(code);
-                    }
-                }
-                return Ok(false);
             }
 
             // ── Phase 2: Remove rects from tree, compute candidate points ──
@@ -1336,12 +1321,21 @@ impl CDirect {
                 }
             }
 
-            // ── Phase 3: Parallel evaluation ──
+            // ── Phase 3: Evaluate candidates ──
+            // Use par_iter when the batch meets the parallel threshold,
+            // otherwise plain iter — matching the Gablonsky batch pattern.
             let func_clone = Arc::clone(func);
-            let f_values: Vec<f64> = all_points
-                .par_iter()
-                .map(|pt| func_clone(pt))
-                .collect();
+            let f_values: Vec<f64> = if all_points.len() >= self.options.min_parallel_evals {
+                all_points
+                    .par_iter()
+                    .map(|pt| func_clone(pt))
+                    .collect()
+            } else {
+                all_points
+                    .iter()
+                    .map(|pt| func_clone(pt))
+                    .collect()
+            };
 
             p.nfev += f_values.len();
 
