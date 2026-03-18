@@ -151,6 +151,43 @@ pub type ObjectiveFn = dyn Fn(&[f64]) -> f64 + Send + Sync;
 /// - Returns: `true` to force stop, `false` to continue
 pub type CallbackFn = dyn Fn(&[f64], f64, usize, usize) -> bool + Send + Sync;
 
+/// Nonlinear inequality constraint function signature.
+///
+/// Convention: `g(x) <= 0` means the constraint is satisfied (feasible).
+/// If `g(x) > 0`, the point is infeasible.
+pub type NonlinearConstraintFn = dyn Fn(&[f64]) -> f64 + Send + Sync;
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Constraints
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// A single linear inequality constraint: `a^T x <= b`.
+///
+/// The constraint is satisfied (feasible) when `sum_i(a[i] * x[i]) <= b`.
+#[derive(Debug, Clone)]
+pub struct LinearConstraint {
+    /// Coefficient vector (length must equal the problem dimension).
+    pub a: Vec<f64>,
+    /// Right-hand side bound.
+    pub b: f64,
+}
+
+/// A set of inequality constraints for the DIRECT optimizer.
+///
+/// Constraints are converted into an infeasibility wrapper around the objective
+/// function: any point violating a constraint returns `f64::INFINITY`, which
+/// the Gablonsky backend handles via `replace_infeasible()` and the CDirect
+/// backend treats as a dominated rectangle.
+///
+/// When no constraints are present, the objective function passes through
+/// unchanged, preserving bit-exact equivalence with NLOPT C.
+pub struct ConstraintSet {
+    /// Linear inequality constraints: `a_i^T x <= b_i`.
+    pub linear: Vec<LinearConstraint>,
+    /// Nonlinear inequality constraints: `g_i(x) <= 0`.
+    pub nonlinear: Vec<Box<NonlinearConstraintFn>>,
+}
+
 // ──────────────────────────────────────────────────────────────────────────────
 // Options
 // ──────────────────────────────────────────────────────────────────────────────

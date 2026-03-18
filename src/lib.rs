@@ -119,8 +119,9 @@ pub mod types;
 pub use cdirect::CDirect;
 pub use error::{DirectError, DirectReturnCode, Result};
 pub use types::{
-    Bounds, CallbackFn, DirectAlgorithm, DirectOptions, DirectResult, ObjectiveFn,
-    DIRECT_UNKNOWN_FGLOBAL, DIRECT_UNKNOWN_FGLOBAL_RELTOL,
+    Bounds, CallbackFn, ConstraintSet, DirectAlgorithm, DirectOptions, DirectResult,
+    LinearConstraint, NonlinearConstraintFn, ObjectiveFn, DIRECT_UNKNOWN_FGLOBAL,
+    DIRECT_UNKNOWN_FGLOBAL_RELTOL,
 };
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -196,6 +197,7 @@ pub struct DirectBuilder {
     bounds: Bounds,
     opts: DirectOptions,
     callback: Option<Box<CallbackFn>>,
+    constraints: Option<ConstraintSet>,
 }
 
 impl DirectBuilder {
@@ -209,6 +211,7 @@ impl DirectBuilder {
             bounds,
             opts: DirectOptions::default(),
             callback: None,
+            constraints: None,
         }
     }
 
@@ -299,34 +302,131 @@ impl DirectBuilder {
         self
     }
 
+    /// Add a single linear inequality constraint: `a^T x <= b`.
+    ///
+    /// The length of `a` must equal the problem dimension.
+    pub fn add_linear_constraint(mut self, a: Vec<f64>, b: f64) -> Self {
+        let cs = self.constraints.get_or_insert_with(|| ConstraintSet {
+            linear: Vec::new(),
+            nonlinear: Vec::new(),
+        });
+        cs.linear.push(LinearConstraint { a, b });
+        self
+    }
+
+    /// Add multiple linear inequality constraints in matrix form: `A x <= b`.
+    ///
+    /// Each row of `a` is a constraint coefficient vector; `b` is the
+    /// right-hand side vector. The number of columns in `a` must equal
+    /// the problem dimension, and `a.len()` must equal `b.len()`.
+    pub fn linear_constraints(mut self, a: Vec<Vec<f64>>, b: Vec<f64>) -> Self {
+        assert_eq!(a.len(), b.len(), "A rows and b length must match");
+        let cs = self.constraints.get_or_insert_with(|| ConstraintSet {
+            linear: Vec::new(),
+            nonlinear: Vec::new(),
+        });
+        for (ai, bi) in a.into_iter().zip(b) {
+            cs.linear.push(LinearConstraint { a: ai, b: bi });
+        }
+        self
+    }
+
+    /// Add a nonlinear inequality constraint: `g(x) <= 0`.
+    ///
+    /// The constraint is satisfied when `g(x) <= 0`. Points where
+    /// `g(x) > 0` are marked infeasible.
+    pub fn add_nonlinear_constraint(
+        mut self,
+        g: impl Fn(&[f64]) -> f64 + Send + Sync + 'static,
+    ) -> Self {
+        let cs = self.constraints.get_or_insert_with(|| ConstraintSet {
+            linear: Vec::new(),
+            nonlinear: Vec::new(),
+        });
+        cs.nonlinear.push(Box::new(g));
+        self
+    }
+
     /// Run the optimization and return the result.
     ///
     /// Dispatches to the Gablonsky translation (`Direct`) for `GablonskyOriginal`
     /// and `GablonskyLocallyBiased` variants, or to the SGJ re-implementation
     /// (`CDirect`) for all other variants.
+    ///
+    /// When constraints are present, the objective function is wrapped so that
+    /// any point violating a constraint returns `f64::INFINITY`. When no
+    /// constraints are present, the original function passes through unchanged,
+    /// preserving bit-exact equivalence with NLOPT C.
     pub fn minimize(self) -> Result<DirectResult> {
+        let func = Self::wrap_with_constraints(self.func, self.constraints);
+
         if self.opts.algorithm.is_gablonsky_translation() {
-            self.minimize_gablonsky()
+            Self::run_gablonsky(func, &self.bounds, self.opts, self.callback)
         } else {
-            self.minimize_cdirect()
+            Self::run_cdirect(func, self.bounds, self.opts, self.callback)
+        }
+    }
+
+    /// Wrap the objective function with constraint checking if constraints are present.
+    ///
+    /// When `constraints` is `None`, returns the original function unchanged
+    /// (zero overhead, bit-exact fallback). When constraints are present, returns
+    /// a closure that evaluates all constraints first — returning `f64::INFINITY`
+    /// for any violated constraint — before calling the objective.
+    fn wrap_with_constraints(
+        func: Box<ObjectiveFn>,
+        constraints: Option<ConstraintSet>,
+    ) -> Box<ObjectiveFn> {
+        match constraints {
+            None => func,
+            Some(cs) => {
+                let linear = cs.linear;
+                let nonlinear = cs.nonlinear;
+                Box::new(move |x: &[f64]| -> f64 {
+                    // Check linear constraints: a^T x <= b
+                    for lc in &linear {
+                        let dot: f64 = lc.a.iter().zip(x).map(|(ai, xi)| ai * xi).sum();
+                        if dot > lc.b {
+                            return f64::INFINITY;
+                        }
+                    }
+                    // Check nonlinear constraints: g(x) <= 0
+                    for g in &nonlinear {
+                        if g(x) > 0.0 {
+                            return f64::INFINITY;
+                        }
+                    }
+                    // All constraints satisfied — evaluate objective
+                    func(x)
+                })
+            }
         }
     }
 
     /// Gablonsky Fortran→C translation path.
-    fn minimize_gablonsky(self) -> Result<DirectResult> {
-        let mut solver = direct::Direct::new(self.func, &self.bounds, self.opts)?;
-        let cb = self.callback;
-        match cb {
-            Some(callback) => solver.minimize(Some(callback.as_ref())),
+    fn run_gablonsky(
+        func: Box<ObjectiveFn>,
+        bounds: &Bounds,
+        opts: DirectOptions,
+        callback: Option<Box<CallbackFn>>,
+    ) -> Result<DirectResult> {
+        let mut solver = direct::Direct::new(func, bounds, opts)?;
+        match callback {
+            Some(cb) => solver.minimize(Some(cb.as_ref())),
             None => solver.minimize(None),
         }
     }
 
     /// SGJ cdirect.c re-implementation path.
-    fn minimize_cdirect(self) -> Result<DirectResult> {
-        let mut solver = CDirect::new(self.func, self.bounds, self.opts);
-        if let Some(callback) = self.callback {
-            solver = solver.with_callback(callback);
+    fn run_cdirect(
+        func: Box<ObjectiveFn>,
+        bounds: Bounds,
+        opts: DirectOptions,
+        callback: Option<Box<CallbackFn>>,
+    ) -> Result<DirectResult> {
+        let mut solver = CDirect::new(func, bounds, opts);
+        if let Some(cb) = callback {
+            solver = solver.with_callback(cb);
         }
         solver.minimize()
     }

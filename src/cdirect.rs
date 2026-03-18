@@ -37,6 +37,20 @@ const EQUAL_SIDE_TOL: f64 = 5e-2;
 /// One third, matching `THIRD` in cdirect.c line 147.
 const THIRD: f64 = 1.0 / 3.0;
 
+/// Feasibility status for a hyperrectangle center point.
+///
+/// Mirrors the feasibility flags used in the Gablonsky backend's
+/// `f_values[idx * 2 + 1]` (see storage.rs) but as a proper enum.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Feasibility {
+    /// Point is feasible (finite objective value).
+    Feasible,
+    /// Infeasible point whose value was replaced by a nearby feasible value.
+    Replaced,
+    /// Point is infeasible (NaN/Inf returned from objective). Not yet replaced.
+    Infeasible,
+}
+
 // ──────────────────────────────────────────────────────────────────────────────
 // HyperRect key for the BTreeMap
 // ──────────────────────────────────────────────────────────────────────────────
@@ -52,12 +66,14 @@ const THIRD: f64 = 1.0 / 3.0;
 #[derive(Debug, Clone)]
 struct HyperRect {
     data: Vec<f64>,
+    feasibility: Feasibility,
 }
 
 impl HyperRect {
     fn new(n: usize) -> Self {
         Self {
             data: vec![0.0; 2 * n + 3],
+            feasibility: Feasibility::Feasible,
         }
     }
 
@@ -180,6 +196,10 @@ struct CDirectParams {
 
     /// Red-black tree equivalent: BTreeMap sorted by (d, f, age).
     rtree: BTreeMap<RectKey, HyperRect>,
+
+    /// Maximum feasible function value seen so far.
+    /// Used by `replace_infeasible()` as the fallback penalty value.
+    fmax: f64,
 }
 
 impl CDirectParams {
@@ -198,6 +218,7 @@ impl CDirectParams {
             age: 0,
             next_id: 0,
             rtree: BTreeMap::new(),
+            fmax: f64::NEG_INFINITY,
         }
     }
 
@@ -393,8 +414,9 @@ impl CDirect {
             rnew.widths_mut(n)[i] = ub[i] - lb[i];
         }
         rnew.set_diameter(Self::rect_diameter(n, rnew.widths(n), p.which_diam));
-        let fval = Self::function_eval(func, rnew.center(n), &mut p);
+        let (fval, feas) = Self::function_eval(func, rnew.center(n), &mut p);
         rnew.set_f_value(fval);
+        rnew.feasibility = feas;
         rnew.set_age(p.age as f64);
         p.age += 1;
 
@@ -430,7 +452,44 @@ impl CDirect {
         // Main loop
         let mut nit: usize = 0;
         loop {
+            // Replace infeasible rectangle values before convex-hull computation.
+            // Mirrors Gablonsky's `if iinfeasible > 0 { replace_infeasible(...) }` call.
+            Self::replace_infeasible(&mut p);
+
             let minf0 = p.minf;
+
+            // If no feasible point has been found yet, skip the convex hull
+            // (which would break on all-INFINITY values) and divide the largest rect.
+            if !p.minf.is_finite() {
+                let key = p.rtree.iter().next_back().map(|(k, _)| k.clone());
+                if let Some(k) = key {
+                    let ret = self.divide_rect_by_key(
+                        func, &mut p, &k, max_feval, max_time, start_time.as_ref(),
+                    );
+                    if let Some(code) = ret {
+                        if code.is_error() {
+                            return Ok(DirectResult::new(p.xmin.clone(), p.minf, p.nfev, nit, code));
+                        }
+                    }
+                }
+                nit += 1;
+                // Check max iterations / time before looping
+                if max_iter > 0 && nit >= max_iter {
+                    return Ok(DirectResult::new(
+                        p.xmin.clone(), p.minf, p.nfev, nit,
+                        DirectReturnCode::MaxIterExceeded,
+                    ));
+                }
+                if let Some(start) = start_time.as_ref() {
+                    if max_time > 0.0 && start.elapsed().as_secs_f64() >= max_time {
+                        return Ok(DirectResult::new(
+                            p.xmin.clone(), p.minf, p.nfev, nit,
+                            DirectReturnCode::MaxTimeExceeded,
+                        ));
+                    }
+                }
+                continue;
+            }
 
             let ret = if self.options.parallel {
                 self.divide_good_rects_parallel(
@@ -521,20 +580,28 @@ impl CDirect {
     /// Evaluate the objective function and update min tracking.
     ///
     /// Matches `function_eval()` in cdirect.c (lines 136–144).
-    /// Updates `p.minf` and `p.xmin` if a new minimum is found.
+    /// Updates `p.minf`, `p.xmin`, and `p.fmax` only for feasible (finite) results.
     /// Increments `p.nfev` unconditionally.
+    ///
+    /// Returns `(stored_value, feasibility)`. For infeasible points the stored
+    /// value is `f64::INFINITY` (to be fixed later by `replace_infeasible`).
     fn function_eval(
         func: &ArcObjFn,
         x: &[f64],
         p: &mut CDirectParams,
-    ) -> f64 {
+    ) -> (f64, Feasibility) {
         let f = func(x);
-        if f < p.minf {
-            p.minf = f;
-            p.xmin.copy_from_slice(x);
-        }
         p.nfev += 1;
-        f
+        if f.is_finite() {
+            if f < p.minf {
+                p.minf = f;
+                p.xmin.copy_from_slice(x);
+            }
+            p.fmax = p.fmax.max(f);
+            (f, Feasibility::Feasible)
+        } else {
+            (f64::INFINITY, Feasibility::Infeasible)
+        }
     }
 
     /// Compute the rectangle diameter measure.
@@ -610,6 +677,7 @@ impl CDirect {
             // Path A: Trisect all longest sides in order of min(f+,f-)
             // Matches cdirect.c lines 169–208
             let mut fv = vec![0.0; 2 * n];
+            let mut feas_v = vec![Feasibility::Feasible; 2 * n];
             let mut isort: Vec<usize> = (0..n).collect();
 
             // Evaluate function along each longest dimension
@@ -619,8 +687,9 @@ impl CDirect {
 
                     // Evaluate at center - w*THIRD
                     rdiv.center_mut(n)[i] = csave - widths[i] * THIRD;
-                    let fval = Self::function_eval(func, rdiv.center(n), p);
+                    let (fval, feas) = Self::function_eval(func, rdiv.center(n), p);
                     fv[2 * i] = fval;
+                    feas_v[2 * i] = feas;
 
                     // Check stopping after eval
                     if let Some(code) = self.check_stop_after_eval(p, max_feval, max_time, start_time) {
@@ -638,8 +707,9 @@ impl CDirect {
 
                     // Evaluate at center + w*THIRD
                     rdiv.center_mut(n)[i] = csave + widths[i] * THIRD;
-                    let fval = Self::function_eval(func, rdiv.center(n), p);
+                    let (fval, feas) = Self::function_eval(func, rdiv.center(n), p);
                     fv[2 * i + 1] = fval;
+                    feas_v[2 * i + 1] = feas;
 
                     rdiv.center_mut(n)[i] = csave;
 
@@ -656,6 +726,8 @@ impl CDirect {
                 } else {
                     fv[2 * i] = f64::INFINITY;
                     fv[2 * i + 1] = f64::INFINITY;
+                    feas_v[2 * i] = Feasibility::Infeasible;
+                    feas_v[2 * i + 1] = Feasibility::Infeasible;
                 }
             }
 
@@ -683,6 +755,7 @@ impl CDirect {
                     // Offset: (2*k - 1) = -1 for k=0, +1 for k=1
                     rnew.center_mut(n)[si] += rdiv.widths(n)[si] * (2.0 * k as f64 - 1.0);
                     rnew.set_f_value(fv[2 * si + k]);
+                    rnew.feasibility = feas_v[2 * si + k];
                     rnew.set_age(p.age as f64);
                     p.age += 1;
                     let key = RectKey {
@@ -731,8 +804,9 @@ impl CDirect {
             for k in 0..=1 {
                 let mut rnew = rdiv.clone();
                 rnew.center_mut(n)[i_div] += rdiv.widths(n)[i_div] * (2.0 * k as f64 - 1.0);
-                let fval = Self::function_eval(func, rnew.center(n), p);
+                let (fval, feas) = Self::function_eval(func, rnew.center(n), p);
                 rnew.set_f_value(fval);
+                rnew.feasibility = feas;
                 rnew.set_age(p.age as f64);
                 p.age += 1;
 
@@ -1339,11 +1413,15 @@ impl CDirect {
 
             p.nfev += f_values.len();
 
-            // Update global minimum from all new evaluations
+            // Update global minimum and fmax from feasible evaluations only.
             for (idx, pt) in all_points.iter().enumerate() {
-                if f_values[idx] < p.minf {
-                    p.minf = f_values[idx];
-                    p.xmin.copy_from_slice(pt);
+                let f = f_values[idx];
+                if f.is_finite() {
+                    if f < p.minf {
+                        p.minf = f;
+                        p.xmin.copy_from_slice(pt);
+                    }
+                    p.fmax = p.fmax.max(f);
                 }
             }
 
@@ -1386,7 +1464,13 @@ impl CDirect {
                             let mut rnew = rdiv.clone();
                             rnew.center_mut(n)[si] +=
                                 rdiv.widths(n)[si] * (2.0 * k as f64 - 1.0);
-                            rnew.set_f_value(if k == 0 { f_minus } else { f_plus });
+                            let fval = if k == 0 { f_minus } else { f_plus };
+                            rnew.set_f_value(fval);
+                            rnew.feasibility = if fval.is_finite() {
+                                Feasibility::Feasible
+                            } else {
+                                Feasibility::Infeasible
+                            };
                             rnew.set_age(p.age as f64);
                             p.age += 1;
                             let key = RectKey {
@@ -1419,6 +1503,11 @@ impl CDirect {
                         rnew.center_mut(n)[i_div] +=
                             rdiv.widths(n)[i_div] * (2.0 * k as f64 - 1.0);
                         rnew.set_f_value(fvals[k]);
+                        rnew.feasibility = if fvals[k].is_finite() {
+                            Feasibility::Feasible
+                        } else {
+                            Feasibility::Infeasible
+                        };
                         rnew.set_age(p.age as f64);
                         p.age += 1;
                         let key = RectKey {
@@ -1448,6 +1537,87 @@ impl CDirect {
             }
 
             return Ok(false);
+        }
+    }
+
+    /// Replace infeasible rectangle values with nearby feasible penalties.
+    ///
+    /// This is the CDirect equivalent of the Gablonsky backend's
+    /// `direct_dirreplaceinf_()` in DIRsubrout.c. For each rectangle marked
+    /// `Infeasible`, we search the entire tree for `Feasible` rectangles
+    /// whose center falls within the infeasible rectangle's bounding box.
+    ///
+    /// - If a nearby feasible point is found: replace the value with the
+    ///   minimum nearby feasible value plus a small perturbation (`|f| * 1e-6`),
+    ///   matching the Gablonsky perturbation, and mark as `Replaced`.
+    /// - If no nearby feasible point is found but `fmax` is finite: replace
+    ///   with `fmax + 1` and mark as `Replaced`.
+    /// - If `fmax` is not finite (no feasible point found yet): leave as
+    ///   `Infeasible` with `INFINITY`; the main loop handles this case by
+    ///   dividing the largest rectangle until a feasible point is discovered.
+    ///
+    /// Re-keys affected rectangles in the BTreeMap since their f-values change.
+    fn replace_infeasible(p: &mut CDirectParams) {
+        let n = p.n;
+
+        // Collect keys of all infeasible rectangles.
+        let infeasible_keys: Vec<RectKey> = p
+            .rtree
+            .iter()
+            .filter(|(_, rect)| rect.feasibility == Feasibility::Infeasible)
+            .map(|(key, _)| key.clone())
+            .collect();
+
+        if infeasible_keys.is_empty() {
+            return;
+        }
+
+        for inf_key in infeasible_keys {
+            let inf_rect = match p.rtree.remove(&inf_key) {
+                Some(r) => r,
+                None => continue,
+            };
+
+            // Compute bounding box of the infeasible rectangle.
+            let center = inf_rect.center(n);
+            let widths = inf_rect.widths(n);
+            let half_widths: Vec<f64> = widths.iter().map(|&w| w * 0.5).collect();
+            let box_lo: Vec<f64> = (0..n).map(|j| center[j] - half_widths[j]).collect();
+            let box_hi: Vec<f64> = (0..n).map(|j| center[j] + half_widths[j]).collect();
+
+            // Search for feasible rectangles whose center falls in the box.
+            let mut best_f = f64::INFINITY;
+            let mut found_nearby = false;
+            for (_, rect) in p.rtree.iter() {
+                if rect.feasibility == Feasibility::Feasible {
+                    let c = rect.center(n);
+                    let in_box = (0..n).all(|j| box_lo[j] <= c[j] && c[j] <= box_hi[j]);
+                    if in_box {
+                        best_f = best_f.min(rect.f_value());
+                        found_nearby = true;
+                    }
+                }
+            }
+
+            let mut new_rect = inf_rect;
+            if found_nearby {
+                // Replace with nearby feasible + perturbation (matching Gablonsky's 1e-6f).
+                new_rect.set_f_value(best_f + best_f.abs() * (1e-6_f32 as f64));
+                new_rect.feasibility = Feasibility::Replaced;
+            } else if p.fmax.is_finite() {
+                // No nearby feasible, but we have a global fmax.
+                new_rect.set_f_value(p.fmax + 1.0);
+                new_rect.feasibility = Feasibility::Replaced;
+            }
+            // else: no feasible point exists yet — keep INFINITY + Infeasible.
+
+            let new_key = RectKey {
+                diameter: new_rect.diameter(),
+                f_value: new_rect.f_value(),
+                age: new_rect.age(),
+                id: p.alloc_id(),
+            };
+            p.rtree.insert(new_key, new_rect);
         }
     }
 
